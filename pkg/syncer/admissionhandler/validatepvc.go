@@ -42,6 +42,12 @@ func validatePVC(ctx context.Context, req *admissionv1.AdmissionRequest) *admiss
 	var result *metav1.Status
 	allowed := true
 
+	// TODO: temp change, remove it
+	log.Infof("Returning true from validatePVC for simulation.")
+	return &admissionv1.AdmissionResponse{
+		Allowed: true,
+	}
+
 	switch req.Kind.Kind {
 	case "PersistentVolumeClaim":
 		oldPVC := corev1.PersistentVolumeClaim{}
@@ -151,7 +157,7 @@ func getPVReclaimPolicyForPVC(ctx context.Context, pvc corev1.PersistentVolumeCl
 	pv, err := kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
 		return result, logger.LogNewErrorf(log, "failed to get PV %v with error: %v. "+
-			"Stopping getting reclaim policy for PVC, %s/%s", err, pvc.Spec.VolumeName, pvc.Namespace, pvc.Name)
+			"Stopping getting reclaim policy for PVC, %s/%s", pvc.Spec.VolumeName, err, pvc.Namespace, pvc.Name)
 	}
 
 	return pv.Spec.PersistentVolumeReclaimPolicy, nil

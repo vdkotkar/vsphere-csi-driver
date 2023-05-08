@@ -23,10 +23,18 @@ func validatePVCAnnotationForTKGSHA(ctx context.Context, request admission.Reque
 	log := logger.GetLogger(ctx)
 	log.Debugf("validatePVCAnnotationForTKGSHA called with the request %v", request)
 
+	if request.Operation == admissionv1.Delete {
+		// req.Object is null for DELETE operations, so json deserialization to PVC from new request
+		// object fails. We are anyway not interested in DELETE operation, so skip webhook validation.
+		reason := "skip validation for Delete PVC request"
+		log.Infof(reason)
+		return admission.Allowed(reason)
+	}
+
 	newPVC := corev1.PersistentVolumeClaim{}
 	if err := json.Unmarshal(request.Object.Raw, &newPVC); err != nil {
 		reason := "skipped validation when failed to deserialize PVC from new request object"
-		log.Warn(reason)
+		log.Warnf(reason, err)
 		return admission.Allowed(reason)
 	}
 
@@ -40,7 +48,7 @@ func validatePVCAnnotationForTKGSHA(ctx context.Context, request admission.Reque
 		oldPVC := corev1.PersistentVolumeClaim{}
 		if err := json.Unmarshal(request.OldObject.Raw, &oldPVC); err != nil {
 			reason := "skipped validation when failed to deserialize PVC from old request object"
-			log.Warn(reason)
+			log.Warnf(reason, err)
 			return admission.Allowed(reason)
 		}
 

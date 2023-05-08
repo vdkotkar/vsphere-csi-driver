@@ -23,13 +23,22 @@ const (
 // Disallow editing PVC Volume Health annotation for non cns-csi service account users.
 func validatePVCAnnotationForVolumeHealth(ctx context.Context, request admission.Request) admission.Response {
 	log := logger.GetLogger(ctx)
+
+	if request.Operation == admissionv1.Delete {
+		// req.Object is null for DELETE operations, so json deserialization to PVC from new request
+		// object fails. We are anyway not interested in DELETE operation, so skip webhook validation.
+		reason := "skip validation for Delete PVC request"
+		log.Infof(reason)
+		return admission.Allowed(reason)
+	}
+
 	username := request.UserInfo.Username
 	isCSIServiceAccount := validateCSIServiceAccount(request.UserInfo.Username)
 	log.Debugf("validatePVCAnnotationForVolumeHealth called with the request %v by user: %v", request, username)
 	newPVC := corev1.PersistentVolumeClaim{}
 	if err := json.Unmarshal(request.Object.Raw, &newPVC); err != nil {
 		reason := "skipped validation when failed to deserialize PVC from new request object"
-		log.Warn(reason)
+		log.Warnf(reason, err)
 		return admission.Allowed(reason)
 	}
 
@@ -42,7 +51,7 @@ func validatePVCAnnotationForVolumeHealth(ctx context.Context, request admission
 		oldPVC := corev1.PersistentVolumeClaim{}
 		if err := json.Unmarshal(request.OldObject.Raw, &oldPVC); err != nil {
 			reason := "skipped validation when failed to deserialize PVC from old request object"
-			log.Warn(reason)
+			log.Warnf(reason, err)
 			return admission.Allowed(reason)
 		}
 
