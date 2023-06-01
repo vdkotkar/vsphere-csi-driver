@@ -41,7 +41,7 @@ ENV CGO_ENABLED=0
 
 ENV GOPROXY ${GOPROXY:-https://proxy.golang.org}
 
-RUN go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer.Version=${VERSION}" -o vsphere-syncer ./cmd/syncer
+RUN go build -cover -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer.Version=${VERSION}" -o vsphere-syncer ./cmd/syncer
 
 ################################################################################
 ##                               MAIN STAGE                                   ##
@@ -56,4 +56,4 @@ LABEL git_commit=$GIT_COMMIT
 
 COPY --from=builder /build/vsphere-syncer /bin/vsphere-syncer
 
-ENTRYPOINT ["/bin/vsphere-syncer"]
+ENTRYPOINT ["GOCOVERDIR=/csicodecov /bin/vsphere-syncer"]
