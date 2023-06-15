@@ -204,12 +204,15 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 		}
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
 		// Create CSINodeTopology CRD.
-		err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, csinodetopologyconfig.EmbedCSINodeTopologyFile,
-			csinodetopologyconfig.EmbedCSINodeTopologyFileName)
-		if err != nil {
-			log.Errorf("Failed to create %q CRD. Error: %+v", csinodetopology.CRDSingular, err)
-			return err
-		}
+		/*
+			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, csinodetopologyconfig.EmbedCSINodeTopologyFile,
+				csinodetopologyconfig.EmbedCSINodeTopologyFileName)
+			if err != nil {
+				log.Errorf("Failed to create %q CRD. Error: %+v", csinodetopology.CRDSingular, err)
+				return err
+			}
+		*/
+		log.Infof("Skipping csiNodeTopologies CRD registration in syncer")
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
 		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.TKGsHA) {
 			// Create CSINodeTopology CRD.
@@ -287,12 +290,14 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 	}
 	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TriggerCsiFullSync) {
 		log.Infof("Triggerfullsync feature enabled")
-		err := k8s.CreateCustomResourceDefinitionFromManifest(ctx, internalapiscnsoperatorconfig.EmbedTriggerCsiFullSync,
-			internalapiscnsoperatorconfig.EmbedTriggerCsiFullSyncName)
-		if err != nil {
-			log.Errorf("Failed to create %q CRD. Err: %+v", internalapis.TriggerCsiFullSyncPlural, err)
-			return err
-		}
+		/*
+			err := k8s.CreateCustomResourceDefinitionFromManifest(ctx, internalapiscnsoperatorconfig.EmbedTriggerCsiFullSync,
+				internalapiscnsoperatorconfig.EmbedTriggerCsiFullSyncName)
+			if err != nil {
+				log.Errorf("Failed to create %q CRD. Err: %+v", internalapis.TriggerCsiFullSyncPlural, err)
+				return err
+			}
+		*/
 		// Get a config to talk to the apiserver.
 		restConfig, err := config.GetConfig()
 		if err != nil {

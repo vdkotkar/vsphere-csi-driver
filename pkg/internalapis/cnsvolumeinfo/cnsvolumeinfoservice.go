@@ -12,7 +12,6 @@ import (
 
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
-	cnsvolumeinfoconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeinfo/config"
 	cnsvolumeinfov1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeinfo/v1alpha1"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
@@ -67,13 +66,15 @@ func InitVolumeInfoService(ctx context.Context) (VolumeInfoService, error) {
 		log.Info("Initializing volumeInfo service...")
 		// This is idempotent if CRD is pre-created then we continue with
 		// initialization of volumeInfoServiceInstance.
-		volumeInfoServiceInitErr := k8s.CreateCustomResourceDefinitionFromManifest(ctx,
-			cnsvolumeinfoconfig.EmbedCnsVolumeInfoFile, cnsvolumeinfoconfig.EmbedCnsVolumeInfoFileName)
+		/*
+			volumeInfoServiceInitErr := k8s.CreateCustomResourceDefinitionFromManifest(ctx,
+				cnsvolumeinfoconfig.EmbedCnsVolumeInfoFile, cnsvolumeinfoconfig.EmbedCnsVolumeInfoFileName)
 
-		if volumeInfoServiceInitErr != nil {
-			return nil, logger.LogNewErrorf(log, "failed to create volume info CRD. Error: %v",
-				volumeInfoServiceInitErr)
-		}
+			if volumeInfoServiceInitErr != nil {
+				return nil, logger.LogNewErrorf(log, "failed to create volume info CRD. Error: %v",
+					volumeInfoServiceInitErr)
+			}
+		*/
 		config, volumeInfoServiceInitErr := k8s.GetKubeConfig(ctx)
 		if volumeInfoServiceInitErr != nil {
 			return nil, logger.LogNewErrorf(log, "failed to get kubeconfig. err: %v", volumeInfoServiceInitErr)

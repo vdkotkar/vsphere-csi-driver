@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	migrationconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration/config"
 
 	migrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration/v1alpha1"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
@@ -126,13 +125,15 @@ func GetVolumeMigrationService(ctx context.Context, volumeManager *cnsvolume.Man
 			log.Info("Initializing volume migration service...")
 			// This is idempotent if CRD is pre-created then we continue with
 			// initialization of volumeMigrationInstance.
-			volumeMigrationServiceInitErr := k8s.CreateCustomResourceDefinitionFromManifest(ctx,
-				migrationconfig.EmbedCnsVSphereVolumeMigrationFile, migrationconfig.EmbedCnsVSphereVolumeMigrationFileName)
+			/*
+				volumeMigrationServiceInitErr := k8s.CreateCustomResourceDefinitionFromManifest(ctx,
+					migrationconfig.EmbedCnsVSphereVolumeMigrationFile, migrationconfig.EmbedCnsVSphereVolumeMigrationFileName)
 
-			if volumeMigrationServiceInitErr != nil {
-				log.Errorf("failed to create volume migration CRD. Error: %v", volumeMigrationServiceInitErr)
-				return nil, volumeMigrationServiceInitErr
-			}
+				if volumeMigrationServiceInitErr != nil {
+					log.Errorf("failed to create volume migration CRD. Error: %v", volumeMigrationServiceInitErr)
+					return nil, volumeMigrationServiceInitErr
+				}
+			*/
 			config, volumeMigrationServiceInitErr := k8s.GetKubeConfig(ctx)
 			if volumeMigrationServiceInitErr != nil {
 				log.Errorf("failed to get kubeconfig. err: %v", volumeMigrationServiceInitErr)
