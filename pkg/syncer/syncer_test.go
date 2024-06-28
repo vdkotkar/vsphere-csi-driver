@@ -112,7 +112,14 @@ func TestSyncerWorkflows(t *testing.T) {
 	}
 
 	virtualCenterManager = cnsvsphere.GetVirtualCenterManager(ctx)
-
+	// GetVirtualCenterManager returns a singleton instance of VirtualCenterManager,
+	// so it could have already registered VCs as part of previous unit test run from
+	// same folder.
+	// Unregister old VCs and register new VC.
+	err = virtualCenterManager.UnregisterAllVirtualCenters(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	virtualCenter, err = virtualCenterManager.RegisterVirtualCenter(ctx, cnsVCenterConfig)
 	if err != nil {
 		t.Fatal(err)

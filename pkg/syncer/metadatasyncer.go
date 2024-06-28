@@ -29,6 +29,10 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/fsnotify/fsnotify"
 	cnstypes "github.com/vmware/govmomi/cns/types"
+	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/view"
+	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/types"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -110,6 +114,9 @@ var (
 
 	// availabilityZoneCRResourceName indicates the resource name of AvailabilityZone CR
 	availabilityZoneCRResourceName = "availabilityzones"
+
+	// testEnv indicates if code is running in context of unit test environment or not
+	testEnv bool = false
 )
 
 const (
@@ -349,7 +356,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 					// TODO: Wait for fullSync to update "zones" value on all CnsVolumeInfo CRs
 
 					// Start informer on AvailabilityZone CRs
-					err = startAvailabilityZoneCRInformer(ctx, k8sConfig)
+					err = startAvailabilityZoneCRInformer(ctx, k8sConfig, vCenter)
 					if err != nil {
 						if err == common.ErrAvailabilityZoneCRNotRegistered {
 							log.Errorf("failed to start informer on AvailabilityZone CR, as AZ CR is not registered.")
@@ -3230,7 +3237,7 @@ func storagePolicyUsageCRSync(ctx context.Context, metadataSyncer *metadataSyncI
 }
 
 // startAvailabilityZoneCRInformer listens on changes to AvailabilityZone CR instances
-func startAvailabilityZoneCRInformer(ctx context.Context, cfg *restclient.Config) error {
+func startAvailabilityZoneCRInformer(ctx context.Context, cfg *restclient.Config, vc *cnsvsphere.VirtualCenter) error {
 	log := logger.GetLogger(ctx)
 	// Check if AZ CR is registered in the environment.
 	// Create a new AvailabilityZone client.
@@ -3260,11 +3267,11 @@ func startAvailabilityZoneCRInformer(ctx context.Context, cfg *restclient.Config
 	availabilityZoneInformer := dynInformer.Informer()
 	_, err = availabilityZoneInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			availabilityZoneCRAdded(obj)
+			availabilityZoneCRAdded(obj, vc)
 		},
 		UpdateFunc: nil,
 		DeleteFunc: func(obj interface{}) {
-			availabilityZoneCRDeleted(obj)
+			availabilityZoneCRDeleted(obj, vc)
 		},
 	})
 	if err != nil {
@@ -3282,8 +3289,8 @@ func startAvailabilityZoneCRInformer(ctx context.Context, cfg *restclient.Config
 
 // availabilityZoneCRAdded starts watching on add, update and delete events on hosts of clusters belonging
 // to this availability zone
-func availabilityZoneCRAdded(obj interface{}) {
-	_, log := logger.GetNewContextWithLogger()
+func availabilityZoneCRAdded(obj interface{}, vc *cnsvsphere.VirtualCenter) {
+	ctx, log := logger.GetNewContextWithLogger()
 	// Retrieve name of CR instance.
 	azName, found, err := unstructured.NestedString(obj.(*unstructured.Unstructured).Object, "metadata", "name")
 	if !found || err != nil {
@@ -3302,11 +3309,16 @@ func availabilityZoneCRAdded(obj interface{}) {
 	log.Infof("AvailabilityZone CR %s got added, it has clusterComputeResourceMoIDs %v",
 		azName, clusterComputeResourceMoIds)
 
-	// TODO: Create ContainerView PropertyCollector to watch on Add, update and delete events on hosts of this cluster
+	// TODO: Currently AvailabilityZone (AZ) CR supports single ClusterComputeResource, if it supports multiple
+	// ClusterComputeResources per AZ CR in future, then we need to create ContainerView to get all clusters of AZ
+	// and then watch on host events of each cluster.
+
+	clusterName := clusterComputeResourceMoIds[0]
+	watchHostEventsOnCluster(ctx, vc, clusterName)
 }
 
 // availabilityZoneCRDeleted stops watching on events of hosts belonging to clusters of this availability zone
-func availabilityZoneCRDeleted(obj interface{}) {
+func availabilityZoneCRDeleted(obj interface{}, vc *cnsvsphere.VirtualCenter) {
 	_, log := logger.GetNewContextWithLogger()
 	// Retrieve name of CR instance.
 	azName, found, err := unstructured.NestedString(obj.(*unstructured.Unstructured).Object, "metadata", "name")
@@ -3327,4 +3339,130 @@ func availabilityZoneCRDeleted(obj interface{}) {
 		azName, clusterComputeResourceMoIds)
 
 	// TODO: Stop watching on any host events of this cluster
+}
+
+func watchHostEventsOnCluster(ctx context.Context, vc *cnsvsphere.VirtualCenter, clusterName string) error {
+	log := logger.GetLogger(ctx)
+
+	// Create PropertyCollector to watch on add, update and delete events on hosts of this cluster
+	clusterMoref := types.ManagedObjectReference{
+		Type:  "ClusterComputeResource",
+		Value: clusterName,
+	}
+
+	// TODO: check how to handle VC client expiry. Refer StoragePool code.
+	// Get default PropertyCollector
+	pc := property.DefaultCollector(vc.Client.Client)
+	// Create a filter to monitor changes in the cluster's host list
+	clusterFilterSpec := types.PropertyFilterSpec{
+		ObjectSet: []types.ObjectSpec{
+			{
+				Obj: clusterMoref,
+			},
+		},
+		PropSet: []types.PropertySpec{
+			{
+				Type:    "ClusterComputeResource",
+				PathSet: []string{"host"},
+			},
+		},
+	}
+	clusterFilter, err := pc.CreateFilter(ctx, types.CreateFilter{Spec: clusterFilterSpec})
+	if err != nil {
+		log.Errorf("failed to create filter on host updates for cluster %s, error: %+v",
+			clusterName, err)
+		return err
+	}
+	defer clusterFilter.Destroy(ctx)
+
+	// Track the known hosts and their versions
+	knownHosts := make(map[string]string)
+	for {
+		err := pc.WaitForUpdatesEx(ctx, property.WaitOptions{}, func(updates []types.ObjectUpdate) bool {
+			for _, update := range updates {
+				log.Infof("Got %d property collector update(s)", len(updates))
+
+				if update.Obj.Type == "ClusterComputeResource" {
+					for _, change := range update.ChangeSet {
+						if change.Name == "host" {
+							newHostRefs := change.Val.(types.ArrayOfManagedObjectReference).ManagedObjectReference
+
+							// Compare the new list of hosts with the known list
+							newHosts := make(map[string]bool)
+							for _, hostRef := range newHostRefs {
+								hostID := hostRef.Value
+								newHosts[hostID] = true
+
+								// Check if the host is newly added
+								if _, known := knownHosts[hostID]; !known {
+									log.Infof("Cluster: %s, Host added: %s", clusterName, hostID)
+									// Initialize host with an empty version
+									knownHosts[hostID] = ""
+								}
+							}
+
+							// Check for removed hosts
+							for knownHostID := range knownHosts {
+								if _, exists := newHosts[knownHostID]; !exists {
+									log.Infof("Cluster: %s, Host removed: %s", clusterName, knownHostID)
+									delete(knownHosts, knownHostID)
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// Check host versions by creating a container view
+			// Create a view manager
+			viewManager := view.NewManager(vc.Client.Client)
+			// Create a container view of hosts for this cluster
+			hostsView, err := viewManager.CreateContainerView(ctx, clusterMoref, []string{"HostSystem"}, true)
+			if err != nil {
+				log.Errorf("failed to create container view on hosts for cluster %s, error: %+v",
+					clusterName, err)
+				return false
+			}
+			defer hostsView.Destroy(ctx)
+
+			var hosts []mo.HostSystem
+			err = hostsView.Retrieve(ctx, []string{"HostSystem"}, []string{"config.product.version"}, &hosts)
+			if err != nil {
+				log.Errorf("failed to retrieve host versions for cluster %s, error: %+v", clusterName, err)
+				return false
+			}
+			shouldResync := true
+			for _, host := range hosts {
+				hostID := host.Reference().Value
+				currentVersion := host.Config.Product.Version
+				if currentVersion != "9.0.0" {
+					shouldResync = false
+				}
+				if knownVersion, exists := knownHosts[hostID]; exists && knownVersion != currentVersion {
+					log.Infof("Cluster: %s, Host: %s, Version: %s", clusterName, hostID, currentVersion)
+					knownHosts[hostID] = currentVersion
+				}
+			}
+			// TODO: make this debug message
+			log.Infof("known hosts list: %v", knownHosts)
+			if shouldResync {
+				// TODO: create a goroutine that filters the volume-id from this specific zone and re-initiates sync volume on them
+				log.Infof("All hosts are of version 9.0.0")
+			}
+
+			// As part of unit test, return true as we don't want to wait for subsequent updates.
+			// Otherwise we want to wait for subsequent updates, hence return false.
+			return testEnv
+		})
+		if err != nil {
+			log.Errorf("WaitForUpdatesEx returned error for cluster %s, error: %v", clusterName, err)
+			return err
+		}
+
+		// If it is running as part of unit test, then return from the for loop.
+		// Otherwise we will wait forever to watch on host events on the cluster.
+		if testEnv {
+			return nil
+		}
+	}
 }
