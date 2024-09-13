@@ -537,12 +537,16 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 	metadataSyncer.k8sInformerManager = k8s.NewInformer(ctx, k8sClient, true)
 	err = metadataSyncer.k8sInformerManager.AddPVCListener(
 		ctx,
-		nil, // Add.
+		func(obj interface{}) { // Add.
+			pvcAddedQuotaHandler(obj, metadataSyncer)
+		},
 		func(oldObj interface{}, newObj interface{}) { // Update.
-			pvcUpdated(oldObj, newObj, metadataSyncer)
+			go pvcUpdated(oldObj, newObj, metadataSyncer)
+			go pvcUpdatedQuotaHandler(oldObj, newObj, metadataSyncer)
 		},
 		func(obj interface{}) { // Delete.
-			pvcDeleted(obj, metadataSyncer)
+			go pvcDeleted(obj, metadataSyncer)
+			go pvcDeletedQuotaHandler(obj, metadataSyncer)
 		})
 	if err != nil {
 		return logger.LogNewErrorf(log, "failed to listen on PVCs. Error: %v", err)
@@ -1799,6 +1803,67 @@ func pvcDeleted(obj interface{}, metadataSyncer *metadataSyncInformer) {
 		pvcsiVolumeDeleted(ctx, string(pvc.GetUID()), metadataSyncer)
 	} else {
 		csiPVCDeleted(ctx, pvc, pv, metadataSyncer)
+	}
+}
+
+// pvcAddedQuotaHandler
+func pvcAddedQuotaHandler(obj interface{}, metadataSyncer *metadataSyncInformer) {
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && isStorageQuotaM2FSSEnabled {
+		_, log := logger.GetNewContextWithLogger()
+		pvc, ok := obj.(*v1.PersistentVolumeClaim)
+		if pvc == nil || !ok {
+			log.Warnf("pvcAddedQuotaHandler: unrecognized object %+v", obj)
+			return
+		}
+		log.Debugf("pvcAddedQuotaHandler: %+v", pvc)
+
+		// Create CnsVolumeOperationRequest CR if it doesn't exist
+
+		return
+	}
+}
+
+// pvcUpdatedQuotaHandler updates
+func pvcUpdatedQuotaHandler(oldObj, newObj interface{}, metadataSyncer *metadataSyncInformer) {
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && isStorageQuotaM2FSSEnabled {
+		_, log := logger.GetNewContextWithLogger()
+		// Get old and new pvc objects.
+		oldPvc, ok := oldObj.(*v1.PersistentVolumeClaim)
+		if oldPvc == nil || !ok {
+			log.Warnf("pvcUpdatedQuotaHandler: unrecognized old object %+v", oldObj)
+			return
+		}
+		newPvc, ok := newObj.(*v1.PersistentVolumeClaim)
+		if newPvc == nil || !ok {
+			log.Warnf("pvcUpdatedQuotaHandler: unrecognized new object %+v", newObj)
+			return
+		}
+		log.Debugf("pvcUpdatedQuotaHandler: PVC Updated from %+v to %+v", oldPvc, newPvc)
+
+		if newPvc.Status.Phase != v1.ClaimBound {
+			log.Debugf("pvcUpdatedQuotaHandler: New PVC not in Bound phase")
+			return
+		}
+
+		return
+	}
+}
+
+// pvcDeletedQuotaHandler deletes
+func pvcDeletedQuotaHandler(obj interface{}, metadataSyncer *metadataSyncInformer) {
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && isStorageQuotaM2FSSEnabled {
+		_, log := logger.GetNewContextWithLogger()
+		pvc, ok := obj.(*v1.PersistentVolumeClaim)
+		if pvc == nil || !ok {
+			log.Warnf("pvcDeletedQuotaHandler: unrecognized object %+v", obj)
+			return
+		}
+		log.Debugf("pvcDeletedQuotaHandler: %+v", pvc)
+		if pvc.Status.Phase != v1.ClaimBound {
+			return
+		}
+
+		return
 	}
 }
 
