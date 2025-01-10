@@ -246,6 +246,27 @@ func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context,
 		msg := fmt.Sprintf("Failed to get virtualmachine instance for the VM with name: %q. Error: %+v",
 			instance.Spec.VMName, err)
 		log.Error(msg)
+		// If virtualmachine instance is NotFound and if deletion timestamp is set on CnsFileAccessConfig instance,
+		// then proceed with the deletion of CnsFileAccessConfig instance.
+		if apierrors.IsNotFound(err) && instance.DeletionTimestamp != nil {
+			log.Infof("CnsFileAccessConfig instance %q has deletion timestamp set, but VM instance with "+
+				"name %q is not found. Processing the deletion of CnsFileAccessConfig instance.",
+				instance.Name, instance.Spec.VMName)
+			removeFinalizerFromCRDInstance(ctx, instance)
+			err = updateCnsFileAccessConfig(ctx, r.client, instance)
+			if err != nil {
+				msg := fmt.Sprintf("failed to update CnsFileAccessConfig instance: %q on namespace: %q. Error: %+v",
+					instance.Name, instance.Namespace, err)
+				recordEvent(ctx, r, instance, v1.EventTypeWarning, msg)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+			// Cleanup instance entry from backOffDuration map.
+			backOffDurationMapMutex.Lock()
+			delete(backOffDuration, instance.Name)
+			backOffDurationMapMutex.Unlock()
+			return reconcile.Result{}, nil
+		}
+
 		setInstanceError(ctx, r, instance, msg)
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
