@@ -147,6 +147,9 @@ const (
 	// Nfsv4AccessPointKey is the key for NFSv4 access point.
 	Nfsv4AccessPointKey = "NFSv4.1"
 
+	// Nfsv3AccessPointKey is the key for NFSv3 access point.
+	Nfsv3AccessPointKey = "NFSv3"
+
 	// Nfsv4AccessPoint is the access point of file volume.
 	Nfsv4AccessPoint = "Nfsv4AccessPoint"
 

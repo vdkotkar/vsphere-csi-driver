@@ -624,7 +624,9 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 	metadataSyncer.k8sInformerManager = k8s.NewInformer(ctx, k8sClient, true)
 	err = metadataSyncer.k8sInformerManager.AddPVCListener(
 		ctx,
-		nil, // Add.
+		func(obj interface{}) { // Add.
+			pvcAdded(obj, metadataSyncer)
+		},
 		func(oldObj interface{}, newObj interface{}) { // Update.
 			pvcUpdated(oldObj, newObj, metadataSyncer)
 		},
@@ -2378,6 +2380,92 @@ func ReloadConfiguration(metadataSyncer *metadataSyncInformer, reconnectToVCFrom
 		}
 	}
 	return nil
+}
+
+// pvcAdded adds file share export paths as annotations on PVC once file volume provisioning
+// is successfully completed
+func pvcAdded(obj interface{}, metadataSyncer *metadataSyncInformer) {
+	ctx, log := logger.GetNewContextWithLogger()
+	if metadataSyncer.clusterFlavor != cnstypes.CnsClusterFlavorWorkload {
+		return
+	}
+	pvc, ok := obj.(*v1.PersistentVolumeClaim)
+	if pvc == nil || !ok {
+		log.Warnf("pvcAdded: unrecognized object %+v", obj)
+		return
+	}
+	// TODO: if PVC is not bound, we will not get a call again. We need to add changes in
+	// FullSync to ensure that file share export paths are added as annotation on PVC.
+	if pvc.Status.Phase != v1.ClaimBound {
+		// TODO: make it debug
+		log.Warnf("pvcAdded: PVC %s in namespace %s state is not bound", pvc.Name, pvc.Namespace)
+		time.Sleep(10 * time.Second)
+		if pvc.Status.Phase != v1.ClaimBound {
+			return
+		}
+	}
+	// Get pv object attached to pvc.
+	pv, err := metadataSyncer.pvLister.Get(pvc.Spec.VolumeName)
+	if pv == nil || err != nil {
+		log.Errorf("pvcAdded: Error getting PV for PVC %s in namespace %s with err: %v",
+			pvc.Name, pvc.Namespace, err)
+		return
+	}
+	// Verify if pv is vSphere CSI volume.
+	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != csitypes.Name {
+		log.Debugf("pvcAdded: Not a vSphere CSI Volume")
+		return
+	}
+	// Check if it is a file volume
+	if !IsFileVolume(pv) {
+		return
+	}
+
+	// Query volume to fetch file share export paths on PVC
+	querySelection := cnstypes.CnsQuerySelection{
+		Names: []string{
+			string(cnstypes.QuerySelectionNameTypeVolumeType),
+			string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
+		},
+	}
+	volume, err := common.QueryVolumeByID(ctx, MetadataSyncer.volumeManager,
+		pv.Spec.CSI.VolumeHandle, &querySelection)
+	if err != nil {
+		log.Errorf("pvcAdded: error while performing QueryVolume on volume %s, error: %+v",
+			pv.Spec.CSI.VolumeHandle, err)
+	}
+	if pvc.Annotations == nil {
+		pvc.Annotations = make(map[string]string)
+	}
+
+	vSANFileBackingDetails := volume.BackingObjectDetails.(*cnstypes.CnsVsanFileShareBackingDetails)
+	accessPoints := make(map[string]string)
+	for _, kv := range vSANFileBackingDetails.AccessPoints {
+		if kv.Key == common.Nfsv3AccessPointKey {
+			pvc.Annotations["csi.vsphere.exportpath.nfs3"] = kv.Value
+		} else if kv.Key == common.Nfsv4AccessPointKey {
+			pvc.Annotations["csi.vsphere.exportpath.nfs41"] = kv.Value
+		}
+		accessPoints[kv.Key] = kv.Value
+	}
+	// TODO: remove
+	log.Infof("pvcAdded: access point details for PVC %s in namespace %s are %+v", pvc.Name, pvc.Namespace,
+		accessPoints)
+
+	// Create the kubernetes client from config.
+	k8sClient, err := k8s.NewClient(ctx)
+	if err != nil {
+		log.Errorf("pvcAdded: Creating Kubernetes client failed. Err: %v", err)
+		return
+	}
+	// Update PVC to add annotation on it
+	pvc, err = k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc,
+		metav1.UpdateOptions{})
+	if err != nil {
+		log.Errorf("pvcAdded: Error updating PVC %s in namespace %s from API server with err: %v",
+			pvc.Name, pvc.Namespace, err)
+		return
+	}
 }
 
 // pvcUpdated updates persistent volume claim metadata on VC when pvc labels
