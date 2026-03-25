@@ -49,8 +49,15 @@ spec:
                 storagePolicyID:
                   description: StoragePolicyID is the ID of the storage policy associated with the volume
                   type: string
+                k8sCompliantName:
+                  description: K8sCompliantName is the K8s-compliant name derived from storage policy name
+                    to ensure unique identification across multiple vCenters.
+                  type: string
                 storageClassName:
                   description: StorageClassName is the name of the storage class associated with the volume
+                  type: string
+                volumeAttributeClassName:
+                  description: VolumeAttributeClassName is the name of the K8s volume attributes class.
                   type: string
                 capacity:
                   anyOf:
@@ -81,6 +88,11 @@ spec:
                   description: SnapshotLatestOperationCompleteTime is Associated time stamp of the create snapshot task completion.
                     This is used to ordering concurrent snapshots on same volume.
                   format: date-time
+                  type: string
+                migrateByMobilityControllerStatus:
+                  description: MigrateByMobilityControllerStatus tracks migration status by Mobility
+                    Controller in case of storage policy update of the volume. Valid values are
+                    "start", "end" etc.
                   type: string
               required:
                 - vCenterServer

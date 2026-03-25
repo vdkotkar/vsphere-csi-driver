@@ -26,6 +26,16 @@ const (
 	CRDSingular = "cnsvolumeinfo"
 )
 
+// MigrationStatus is a type for migration status values
+type MigrationStatus string
+
+const (
+	// MigrationStatusStart is used to indicate that storage policy migration has started.
+	MigrationStatusStart MigrationStatus = "start"
+	// MigrationStatusEnd is used to indicate that storage policy migration has ended.
+	MigrationStatusEnd MigrationStatus = "end"
+)
+
 // CNSVolumeInfoSpec defines the desired state of CNSVolumeInfo
 type CNSVolumeInfoSpec struct {
 
@@ -41,8 +51,15 @@ type CNSVolumeInfoSpec struct {
 	// ID of the storage policy
 	StoragePolicyID string `json:"storagePolicyID,omitempty"`
 
+	// K8sCompliantName is the K8s-compliant name derived from storage policy name to ensure
+	// unique identification across multiple vCenters.
+	K8sCompliantName string `json:"k8sCompliantName,omitempty"`
+
 	// Name of the storage class
 	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// VolumeAttributeClassName is the name of the K8s volume attributes class.
+	VolumeAttributeClassName string `json:"volumeAttributeClassName,omitempty"`
 
 	// Capacity stores the current capacity of the PersistentVolume this volume represents.
 	Capacity *resource.Quantity `json:"capacity,omitempty"`
@@ -62,6 +79,11 @@ type CNSVolumeInfoSpec struct {
 
 	// IsLinkedClone reports if the volume is linked clone volume
 	IsLinkedClone bool `json:"isLinkedClone"`
+
+	// MigrateByMobilityControllerStatus tracks migration status by Mobility Controller in case
+	// of storage policy update of the volume.
+	// Valid values are "start", "end" etc.
+	MigrateByMobilityControllerStatus MigrationStatus `json:"migrateByMobilityControllerStatus,omitempty"`
 }
 
 //+kubebuilder:object:root=true
