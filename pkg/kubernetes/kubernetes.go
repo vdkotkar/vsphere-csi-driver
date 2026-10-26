@@ -36,7 +36,6 @@ import (
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -346,7 +345,9 @@ func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Confi
 		log.Errorf("failed to create RESTClient with err: %+v", err)
 		return nil, err
 	}
-	return cache.NewListWatchFromClient(restClient, cnsfileaccessconfigKind, namespace, fields.Everything()), nil
+	// NewListWatchFromClient overwrites the caller's FieldSelector, so use a no-op modifier instead.
+	return cache.NewFilteredListWatchFromClient(restClient, cnsfileaccessconfigKind, namespace,
+		func(*metav1.ListOptions) {}), nil
 }
 
 // NewVirtualMachineWatcher creates a new ListWatch for VirtualMachines given
@@ -385,7 +386,9 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 		log.Errorf("failed to create RESTClient with err: %+v", err)
 		return nil, err
 	}
-	return cache.NewListWatchFromClient(restClient, virtualMachineKind, namespace, fields.Everything()), nil
+	// NewListWatchFromClient overwrites the caller's FieldSelector, so use a no-op modifier instead.
+	return cache.NewFilteredListWatchFromClient(restClient, virtualMachineKind, namespace,
+		func(*metav1.ListOptions) {}), nil
 }
 
 // NewCSINodeTopologyWatcher creates a new ListWatch for CSINodeTopology objects
@@ -418,7 +421,9 @@ func NewCSINodeTopologyWatcher(ctx context.Context, config *restclient.Config) (
 		log.Errorf("failed to create RESTClient for %s CR with err: %+v", csiNodeTopologyKind, err)
 		return nil, err
 	}
-	return cache.NewListWatchFromClient(restClient, csiNodeTopologyKind, v1.NamespaceAll, fields.Everything()), nil
+	// NewListWatchFromClient overwrites the caller's FieldSelector, so use a no-op modifier instead.
+	return cache.NewFilteredListWatchFromClient(restClient, csiNodeTopologyKind, v1.NamespaceAll,
+		func(*metav1.ListOptions) {}), nil
 }
 
 // CreateKubernetesClientFromConfig creaates a newk8s client from given
