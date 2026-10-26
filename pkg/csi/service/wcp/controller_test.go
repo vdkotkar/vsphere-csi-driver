@@ -3151,24 +3151,6 @@ func TestControllerModifyVolume(t *testing.T) {
 		}
 	})
 
-	t.Run("ErrorReturnsInvalidArgument", func(t *testing.T) {
-		fakeVIS := newFakeVIS()
-		fakeVIS.setMigrationConditions([]metav1.Condition{{
-			Type:   cnsvolumeinfov1alpha1.MigrationConditionError,
-			Status: metav1.ConditionTrue,
-		}})
-		volumeInfoService = fakeVIS
-		timeoutCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		defer cancel()
-		_, err := ct.controller.ControllerModifyVolume(timeoutCtx, makeReq())
-		if err == nil {
-			t.Fatalf("expected InvalidArgument when MigrationConditions=Error")
-		}
-		if status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("expected codes.InvalidArgument, got %v", status.Code(err))
-		}
-	})
-
 	t.Run("InfeasibleReturnsInvalidArgument", func(t *testing.T) {
 		fakeVIS := newFakeVIS()
 		fakeVIS.setMigrationConditions([]metav1.Condition{{

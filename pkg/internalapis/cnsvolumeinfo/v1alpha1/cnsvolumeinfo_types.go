@@ -78,9 +78,6 @@ const (
 	// MigrationConditionInfeasible indicates the migration cannot be performed
 	MigrationConditionInfeasible = "Infeasible"
 
-	// MigrationConditionError indicates the migration failed with an error
-	MigrationConditionError = "Error"
-
 	// MigrationConditionComplete indicates the migration has completed successfully
 	MigrationConditionComplete = "Complete"
 )
@@ -93,7 +90,6 @@ type CNSVolumeInfoStatus struct {
 	//
 	// "InProgress"
 	// "Infeasible"
-	// "Error"
 	// "Complete"
 	//
 	// +optional

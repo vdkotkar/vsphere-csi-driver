@@ -26,6 +26,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,10 +53,25 @@ import (
 
 // TestClassifyMigrationCR exercises the migration-CR -> outcome mapping that
 // is the contract between the Mobility Operator (v1alpha4) and the CSI Syncer.
-// Outcome is keyed off the Ready condition only.
+// Outcome is keyed off the Ready condition only, and only when Ready's
+// observedGeneration matches the CR's metadata.generation.
 func TestClassifyMigrationCR(t *testing.T) {
+	// cond builds a condition observed at generation 1, matching crWith.
 	cond := func(t, status, reason string) map[string]interface{} {
-		return map[string]interface{}{"type": t, "status": status, "reason": reason}
+		return map[string]interface{}{"type": t, "status": status, "reason": reason,
+			"observedGeneration": int64(1)}
+	}
+	staleCond := func(t, status, reason string) map[string]interface{} {
+		c := cond(t, status, reason)
+		c["observedGeneration"] = int64(0)
+		return c
+	}
+	// crWith builds a CR at metadata.generation 1 with the given conditions.
+	crWith := func(conds ...interface{}) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]interface{}{
+			"metadata": map[string]interface{}{"generation": int64(1)},
+			"status":   map[string]interface{}{"conditions": conds},
+		}}
 	}
 	tests := []struct {
 		name string
@@ -74,94 +90,77 @@ func TestClassifyMigrationCR(t *testing.T) {
 		},
 		{
 			name: "no Ready condition -> InProgress",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Validated", "True", "Accepted"),
-						cond("StorageInSync", "True", "InSync"),
-					},
-				},
-			}},
+			cr: crWith(
+				cond("Validated", "True", "Accepted"),
+				cond("StorageInSync", "True", "InSync"),
+			),
 			want: migrationOutcomeInProgress,
 		},
 		{
 			name: "Ready=Unknown -> InProgress",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Ready", "Unknown", "Reconciling"),
-					},
-				},
-			}},
+			cr:   crWith(cond("Ready", "Unknown", "Reconciling")),
 			want: migrationOutcomeInProgress,
 		},
 		{
 			name: "Ready=True -> Complete",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Validated", "True", "Accepted"),
-						cond("StorageInSync", "True", "InSync"),
-						cond("Ready", "True", "Succeeded"),
-					},
-				},
-			}},
+			cr: crWith(
+				cond("Validated", "True", "Accepted"),
+				cond("StorageInSync", "True", "InSync"),
+				cond("Ready", "True", "Succeeded"),
+			),
 			want: migrationOutcomeComplete,
 		},
 		{
-			name: "Ready=False with Internal reason -> Error",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Ready", "False", "Internal"),
-					},
-				},
-			}},
-			want: migrationOutcomeError,
+			name: "Ready=False with InProgress reason -> InProgress",
+			cr:   crWith(cond("Ready", "False", "InProgress")),
+			want: migrationOutcomeInProgress,
 		},
 		{
-			name: "Ready=False with no reason -> Error",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Ready", "False", ""),
-					},
-				},
-			}},
-			want: migrationOutcomeError,
+			name: "Ready=False with retryable Errored reason -> InProgress",
+			cr:   crWith(cond("Ready", "False", "Errored")),
+			want: migrationOutcomeInProgress,
+		},
+		{
+			name: "Ready=False with no reason -> InProgress",
+			cr:   crWith(cond("Ready", "False", "")),
+			want: migrationOutcomeInProgress,
 		},
 		{
 			name: "Ready=False with Infeasible reason -> Infeasible",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Ready", "False", "Infeasible"),
-					},
-				},
-			}},
+			cr:   crWith(cond("Ready", "False", "Infeasible")),
 			want: migrationOutcomeInfeasible,
 		},
 		{
 			name: "Ready=False with NotSupported reason -> Infeasible",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Ready", "False", "NotSupported"),
-					},
-				},
-			}},
+			cr:   crWith(cond("Ready", "False", "NotSupported")),
 			want: migrationOutcomeInfeasible,
 		},
 		{
 			name: "Ready=False with UnsupportedZoneChange reason -> Infeasible",
-			cr: &unstructured.Unstructured{Object: map[string]interface{}{
-				"status": map[string]interface{}{
-					"conditions": []interface{}{
-						cond("Ready", "False", "UnsupportedZoneChange"),
-					},
-				},
-			}},
+			cr:   crWith(cond("Ready", "False", "UnsupportedZoneChange")),
 			want: migrationOutcomeInfeasible,
+		},
+		{
+			name: "stale Ready=True (observedGeneration behind) -> InProgress",
+			cr:   crWith(staleCond("Ready", "True", "Succeeded")),
+			want: migrationOutcomeInProgress,
+		},
+		{
+			name: "stale Ready=False/NotSupported (observedGeneration behind) -> InProgress",
+			cr:   crWith(staleCond("Ready", "False", "NotSupported")),
+			want: migrationOutcomeInProgress,
+		},
+		{
+			name: "Ready=True without observedGeneration -> InProgress",
+			cr: crWith(map[string]interface{}{
+				"type": "Ready", "status": "True", "reason": "Succeeded"}),
+			want: migrationOutcomeInProgress,
+		},
+		{
+			name: "Ready=True with float64 observedGeneration -> Complete",
+			cr: crWith(map[string]interface{}{
+				"type": "Ready", "status": "True", "reason": "Succeeded", "observedGeneration": float64(1)}),
+			want: migrationOutcomeComplete,
 		},
 	}
 
@@ -361,6 +360,7 @@ func resetMigrationStateForTest(t *testing.T) {
 	origInit := migrationInitVolumeInfoService
 	origGetter := migrationDynamicClientGetter
 	origHandle := migrationHandleStoragePolicyChange
+	origResolve := migrationResolveTargetStoragePolicyID
 	origInterval := migrationPollInterval
 	origSvc := volumeInfoService
 	origFSS := IsVMPVCStoragePolicyMutabilityEnabled
@@ -381,6 +381,7 @@ func resetMigrationStateForTest(t *testing.T) {
 		migrationInitVolumeInfoService = origInit
 		migrationDynamicClientGetter = origGetter
 		migrationHandleStoragePolicyChange = origHandle
+		migrationResolveTargetStoragePolicyID = origResolve
 		migrationPollInterval = origInterval
 		volumeInfoService = origSvc
 		IsVMPVCStoragePolicyMutabilityEnabled = origFSS
@@ -1097,11 +1098,11 @@ func TestPatchMigrationConditionsType(t *testing.T) {
 		}
 	})
 
-	t.Run("patches Terminal Error condition", func(t *testing.T) {
+	t.Run("patches Terminal Infeasible condition", func(t *testing.T) {
 		syncer.cnsOperatorClient = makeFakeCNSClient(seedCVI)
 
 		err := patchMigrationConditionsTerminal(ctx, "ns", "pvc-1",
-			cnsvolumeinfov1alpha1.MigrationConditionError, syncer)
+			cnsvolumeinfov1alpha1.MigrationConditionInfeasible, syncer)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1109,9 +1110,9 @@ func TestPatchMigrationConditionsType(t *testing.T) {
 		if len(got.Status.MigrationConditions) == 0 {
 			t.Fatal("expected at least one condition")
 		}
-		if got.Status.MigrationConditions[0].Type != cnsvolumeinfov1alpha1.MigrationConditionError {
+		if got.Status.MigrationConditions[0].Type != cnsvolumeinfov1alpha1.MigrationConditionInfeasible {
 			t.Fatalf("got condition type %q, want %q",
-				got.Status.MigrationConditions[0].Type, cnsvolumeinfov1alpha1.MigrationConditionError)
+				got.Status.MigrationConditions[0].Type, cnsvolumeinfov1alpha1.MigrationConditionInfeasible)
 		}
 	})
 
@@ -1488,19 +1489,73 @@ func TestStartMigrationWatcher(t *testing.T) {
 		Resource: common.MobilityOperatorVolumeResource,
 	}
 
-	makeCR := func(ready string, reason string) *unstructured.Unstructured {
+	// The PVC is being modified to VAC "vac-gold", which resolves to
+	// policy-uuid-gold.
+	migrationResolveTargetStoragePolicyID = func(_ context.Context, _ *metadataSyncInformer,
+		_, _ string) (string, error) {
+		return "policy-uuid-gold", nil
+	}
+
+	makeCRForPolicy := func(ready, reason, policyID string) *unstructured.Unstructured {
 		cr := &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": common.MobilityOperatorGroup + "/" + common.MobilityOperatorVersion,
 			"kind":       common.MigrationCRKindVolume,
-			"metadata":   map[string]interface{}{"namespace": "ns", "name": "cr-1"},
-			"spec":       map[string]interface{}{"storagePolicyID": "policy-uuid-gold"},
+			"metadata": map[string]interface{}{"namespace": "ns", "name": "cr-1",
+				"generation": int64(1)},
+			"spec": map[string]interface{}{"storagePolicyID": policyID},
 		}}
 		if ready != "" {
 			_ = unstructured.SetNestedSlice(cr.Object, []interface{}{
-				map[string]interface{}{"type": "Ready", "status": ready, "reason": reason},
+				map[string]interface{}{"type": "Ready", "status": ready, "reason": reason,
+					"observedGeneration": int64(1)},
 			}, "status", "conditions")
 		}
 		return cr
+	}
+	makeCR := func(ready string, reason string) *unstructured.Unstructured {
+		return makeCRForPolicy(ready, reason, "policy-uuid-gold")
+	}
+	updateCR := func(t *testing.T, dyn dynamic.Interface, cr *unstructured.Unstructured) {
+		t.Helper()
+		if _, err := dyn.Resource(gvr).Namespace("ns").Update(ctx, cr, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("update CR failed: %v", err)
+		}
+	}
+	watcherActive := func() bool {
+		activeMigrationsMu.Lock()
+		defer activeMigrationsMu.Unlock()
+		_, present := activeMigrations["ns/pvc-1"]
+		return present
+	}
+	waitWatcherExit := func(t *testing.T) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if !watcherActive() {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("watcher did not exit in time")
+	}
+	migrationConditionType := func(t *testing.T) string {
+		t.Helper()
+		got := getCNSVolumeInfoFromClient(t, syncer.cnsOperatorClient, "csi-handle-1")
+		if len(got.Status.MigrationConditions) == 0 {
+			return ""
+		}
+		return got.Status.MigrationConditions[0].Type
+	}
+	// startWatcherOn starts a watcher against a fresh fake dynamic client
+	// serving initialCR and returns that client.
+	startWatcherOn := func(t *testing.T, initialCR *unstructured.Unstructured) dynamic.Interface {
+		t.Helper()
+		fakeDyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+			map[schema.GroupVersionResource]string{gvr: "VolumeMigrationList"}, initialCR)
+		migrationDynamicClientGetter = func() (dynamic.Interface, error) { return fakeDyn, nil }
+		syncer.cnsOperatorClient = makeFakeCNSClient(watcherSeedCVI)
+		startMigrationWatcher(ctx, "ns", "pvc-1", common.MigrationCRKindVolume, "cr-1", syncer)
+		return fakeDyn
 	}
 
 	runWatcherUntilDone := func(
@@ -1554,7 +1609,58 @@ func TestStartMigrationWatcher(t *testing.T) {
 		})
 	})
 
-	t.Run("terminal Error propagates and exits", func(t *testing.T) {
+	t.Run("Ready=False with retryable reason keeps polling until Complete", func(t *testing.T) {
+		resetMigrationStateForTest(t)
+		migrationPollInterval = 10 * time.Millisecond
+		volumeInfoService = fakeSvc
+		var quotaMu sync.Mutex
+		quotaTransferred := false
+		migrationHandleStoragePolicyChange = func(
+			_ context.Context, _ client.Client,
+			_, _ cnsvolumeinfov1alpha1.CNSVolumeInfo) {
+			quotaMu.Lock()
+			quotaTransferred = true
+			quotaMu.Unlock()
+		}
+
+		dyn := startWatcherOn(t, makeCR("False", "InProgress"))
+		// Several polls with Ready=False/InProgress, then a retryable error.
+		time.Sleep(50 * time.Millisecond)
+		updateCR(t, dyn, makeCR("False", "Errored"))
+		time.Sleep(50 * time.Millisecond)
+		if !watcherActive() {
+			t.Fatal("watcher exited on a non-terminal Ready=False reason")
+		}
+		if got := migrationConditionType(t); got != cnsvolumeinfov1alpha1.MigrationConditionInProgress {
+			t.Fatalf("MigrationConditions = %q while retrying, want %q",
+				got, cnsvolumeinfov1alpha1.MigrationConditionInProgress)
+		}
+
+		updateCR(t, dyn, makeCR("True", "Succeeded"))
+		waitWatcherExit(t)
+		if got := migrationConditionType(t); got != cnsvolumeinfov1alpha1.MigrationConditionComplete {
+			t.Fatalf("MigrationConditions = %q, want %q", got, cnsvolumeinfov1alpha1.MigrationConditionComplete)
+		}
+		quotaMu.Lock()
+		defer quotaMu.Unlock()
+		if !quotaTransferred {
+			t.Fatal("expected StoragePolicyUsage transfer on Complete")
+		}
+	})
+
+	t.Run("Ready=False/NotSupported patches Infeasible and exits", func(t *testing.T) {
+		resetMigrationStateForTest(t)
+		migrationPollInterval = 10 * time.Millisecond
+		volumeInfoService = fakeSvc
+
+		startWatcherOn(t, makeCR("False", "NotSupported"))
+		waitWatcherExit(t)
+		if got := migrationConditionType(t); got != cnsvolumeinfov1alpha1.MigrationConditionInfeasible {
+			t.Fatalf("MigrationConditions = %q, want %q", got, cnsvolumeinfov1alpha1.MigrationConditionInfeasible)
+		}
+	})
+
+	t.Run("Ready from previous run is ignored until CR targets the new policy", func(t *testing.T) {
 		resetMigrationStateForTest(t)
 		migrationPollInterval = 10 * time.Millisecond
 		volumeInfoService = fakeSvc
@@ -1563,14 +1669,51 @@ func TestStartMigrationWatcher(t *testing.T) {
 			_, _ cnsvolumeinfov1alpha1.CNSVolumeInfo) {
 		}
 
-		runWatcherUntilDone(t, func(dyn dynamic.Interface) {
-			cr := makeCR("False", "Internal")
-			_, err := dyn.Resource(gvr).Namespace("ns").
-				Update(ctx, cr, metav1.UpdateOptions{})
-			if err != nil {
-				t.Fatalf("update CR -> Ready=False/Internal failed: %v", err)
-			}
-		})
+		// The CR still carries the previous run's policy and Ready=True.
+		dyn := startWatcherOn(t, makeCRForPolicy("True", "Succeeded", "policy-uuid-silver"))
+		time.Sleep(50 * time.Millisecond)
+		if !watcherActive() {
+			t.Fatal("watcher completed on a CR targeting a different policy")
+		}
+		if got := migrationConditionType(t); got != cnsvolumeinfov1alpha1.MigrationConditionInProgress {
+			t.Fatalf("MigrationConditions = %q, want %q", got, cnsvolumeinfov1alpha1.MigrationConditionInProgress)
+		}
+
+		// A terminal reason from the previous run is ignored as well.
+		updateCR(t, dyn, makeCRForPolicy("False", "NotSupported", "policy-uuid-silver"))
+		time.Sleep(50 * time.Millisecond)
+		if !watcherActive() {
+			t.Fatal("watcher failed on a CR targeting a different policy")
+		}
+
+		// Mobility reconciles the retarget.
+		updateCR(t, dyn, makeCR("True", "Succeeded"))
+		waitWatcherExit(t)
+		if got := migrationConditionType(t); got != cnsvolumeinfov1alpha1.MigrationConditionComplete {
+			t.Fatalf("MigrationConditions = %q, want %q", got, cnsvolumeinfov1alpha1.MigrationConditionComplete)
+		}
+	})
+
+	t.Run("target policy resolution failure keeps polling", func(t *testing.T) {
+		resetMigrationStateForTest(t)
+		migrationPollInterval = 10 * time.Millisecond
+		volumeInfoService = fakeSvc
+		migrationResolveTargetStoragePolicyID = func(_ context.Context, _ *metadataSyncInformer,
+			_, _ string) (string, error) {
+			return "", errors.New("VAC lookup failed")
+		}
+
+		dyn := startWatcherOn(t, makeCR("True", "Succeeded"))
+		time.Sleep(50 * time.Millisecond)
+		if !watcherActive() {
+			t.Fatal("watcher completed without resolving the target policy")
+		}
+
+		// Let the watcher exit before cleanup restores the seams it reads.
+		if err := dyn.Resource(gvr).Namespace("ns").Delete(ctx, "cr-1", metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("delete CR failed: %v", err)
+		}
+		waitWatcherExit(t)
 	})
 
 	t.Run("terminal Infeasible propagates and exits", func(t *testing.T) {
@@ -1789,15 +1932,46 @@ func TestPatchMigrationConditionsTypeClientError(t *testing.T) {
 // we don't panic on it).
 func TestClassifyMigrationCRSkipsNonMapEntry(t *testing.T) {
 	cr := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"generation": int64(1)},
 		"status": map[string]interface{}{
 			"conditions": []interface{}{
 				"not-a-map", // skipped
-				map[string]interface{}{"type": "Ready", "status": "True", "reason": "Succeeded"},
+				map[string]interface{}{"type": "Ready", "status": "True", "reason": "Succeeded",
+					"observedGeneration": int64(1)},
 			},
 		},
 	}}
 	if got := classifyMigrationCR(cr); got != migrationOutcomeComplete {
 		t.Fatalf("got %v, want Complete", got)
+	}
+}
+
+// TestResolveTargetStoragePolicyID verifies the PVC -> VAC -> storage policy
+// resolution used to confirm a migration CR targets the current modify.
+func TestResolveTargetStoragePolicyID(t *testing.T) {
+	resetMigrationStateForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pvcGold := makePVC("ns", "pvc-gold", "pv-1", "sc", "vac-gold")
+	pvcMissingVAC := makePVC("ns", "pvc-missing-vac", "pv-2", "sc", "vac-missing")
+	pvcNoVAC := makePVC("ns", "pvc-no-vac", "pv-3", "sc", "")
+	syncer, _ := newSyncerWithListers(t, ctx,
+		[]*v1.PersistentVolumeClaim{pvcGold, pvcMissingVAC, pvcNoVAC}, nil)
+	syncer.supervisorClient = k8sfake.NewClientset(&storagev1.VolumeAttributesClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "vac-gold"},
+		DriverName: "csi.vsphere.vmware.com",
+		Parameters: map[string]string{"storagePolicyID": "policy-uuid-gold"},
+	})
+
+	got, err := resolveTargetStoragePolicyID(ctx, syncer, "ns", "pvc-gold")
+	if err != nil || got != "policy-uuid-gold" {
+		t.Fatalf("resolveTargetStoragePolicyID = (%q, %v), want (%q, nil)", got, err, "policy-uuid-gold")
+	}
+	for _, name := range []string{"pvc-missing-vac", "pvc-no-vac", "pvc-does-not-exist"} {
+		if _, err := resolveTargetStoragePolicyID(ctx, syncer, "ns", name); err == nil {
+			t.Fatalf("resolveTargetStoragePolicyID(%q): expected error", name)
+		}
 	}
 }
 

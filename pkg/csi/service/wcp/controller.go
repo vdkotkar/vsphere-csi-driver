@@ -3493,19 +3493,12 @@ func checkMigrationTerminalConditions(
 	// (JSON Merge Patch replaces arrays atomically), so at most one condition is
 	// present at a time. FindStatusCondition is a keyed lookup by type, so slice
 	// order and length do not affect correctness. The check order below
-	// (Complete → Error → Infeasible) reflects intentional precedence.
+	// (Complete → Infeasible) reflects intentional precedence.
 	conds := cvi.Status.MigrationConditions
 	if c := apimeta.FindStatusCondition(conds, cnsvolumeinfov1alpha1.MigrationConditionComplete); c != nil &&
 		c.Status == metav1.ConditionTrue {
 		log.Infof("Volume %q migration successfully completed by Mobility Controller", volumeID)
 		return &csi.ControllerModifyVolumeResponse{}, nil, true
-	}
-	if c := apimeta.FindStatusCondition(conds, cnsvolumeinfov1alpha1.MigrationConditionError); c != nil &&
-		c.Status == metav1.ConditionTrue {
-		// Returning codes.InvalidArgument so csi-resizer marks the PVC Infeasible
-		// and the user can roll back to the original VAC.
-		return nil, status.Errorf(codes.InvalidArgument,
-			"Mobility Controller failed to migrate volume %s", volumeID), true
 	}
 	if c := apimeta.FindStatusCondition(conds, cnsvolumeinfov1alpha1.MigrationConditionInfeasible); c != nil &&
 		c.Status == metav1.ConditionTrue {
@@ -3530,7 +3523,7 @@ func checkMigrationTerminalConditions(
 //   - codes.Unimplemented        - the supports_VM_PVC_storage_policy_mutability
 //     capability is not enabled on the supervisor.
 //   - codes.InvalidArgument      - basic request validation failure, or the
-//     Mobility Operator reported Error / Infeasible
+//     Mobility Operator reported Infeasible
 //     via MigrationConditions. csi-resizer marks
 //     the PVC Infeasible, allowing the user to roll
 //     back by patching spec.VAC; the slow-retry

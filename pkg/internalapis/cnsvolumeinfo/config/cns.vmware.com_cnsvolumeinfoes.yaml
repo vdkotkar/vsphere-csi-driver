@@ -99,7 +99,7 @@ spec:
                 migrationConditions:
                   description: MigrationConditions describe the current conditions of
                     the migration. Known condition types are "InProgress", "Infeasible",
-                    "Error", "Complete".
+                    "Complete".
                   items:
                     description: metav1.Condition represents an observation of an
                       object's state. Some examples are available at

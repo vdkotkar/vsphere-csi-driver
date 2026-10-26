@@ -107,6 +107,8 @@ var (
 	migrationInitVolumeInfoService     = cnsvolumeinfo.InitVolumeInfoService
 	migrationStartMigrationWatcher     = startMigrationWatcher
 	migrationHandleStoragePolicyChange = handleVACChangeForVolumeInfo
+	// migrationResolveTargetStoragePolicyID is a seam for resolveTargetStoragePolicyID.
+	migrationResolveTargetStoragePolicyID = resolveTargetStoragePolicyID
 )
 
 // getMigrationDynamicClient returns the process-wide shared dynamic client used
@@ -273,6 +275,9 @@ func startMigrationWatcher(parentCtx context.Context, pvcNamespace, pvcName, crK
 				case migrationOutcomeInProgress:
 					continue
 				case migrationOutcomeComplete:
+					if !isMigrationCRForTargetPolicy(watchCtx, metadataSyncer, pvcNamespace, pvcName, cr) {
+						continue
+					}
 					if err := propagateMigrationSuccess(watchCtx, metadataSyncer, pvcNamespace, pvcName, cr); err != nil {
 						log.Errorf("startMigrationWatcher: failed to propagate success for PVC %s: %v", key, err)
 						// Don't return; we want to retry on the next tick rather than
@@ -280,14 +285,10 @@ func startMigrationWatcher(parentCtx context.Context, pvcNamespace, pvcName, crK
 						continue
 					}
 					return
-				case migrationOutcomeError:
-					if err := patchMigrationConditionsTerminal(watchCtx, pvcNamespace, pvcName,
-						cnsvolumeinfov1alpha1.MigrationConditionError, metadataSyncer); err != nil {
-						log.Errorf("startMigrationWatcher: failed to patch Error condition for PVC %s: %v", key, err)
+				case migrationOutcomeInfeasible:
+					if !isMigrationCRForTargetPolicy(watchCtx, metadataSyncer, pvcNamespace, pvcName, cr) {
 						continue
 					}
-					return
-				case migrationOutcomeInfeasible:
 					if err := patchMigrationConditionsTerminal(watchCtx, pvcNamespace, pvcName,
 						cnsvolumeinfov1alpha1.MigrationConditionInfeasible, metadataSyncer); err != nil {
 						log.Errorf("startMigrationWatcher: failed to patch Infeasible condition for PVC %s: %v", key, err)
@@ -306,7 +307,6 @@ type migrationOutcome int
 const (
 	migrationOutcomeInProgress migrationOutcome = iota
 	migrationOutcomeComplete
-	migrationOutcomeError
 	migrationOutcomeInfeasible
 )
 
@@ -315,14 +315,20 @@ const (
 // through status.conditions[].
 //
 // Contract (anchored on the "Ready" condition):
+//   - Ready.observedGeneration != metadata.generation (or unset) -> InProgress.
+//     Retarget / rollback patch the CR in place, so until the next reconcile
+//     Ready can still carry the previous run's outcome.
 //   - Ready.status == "True"  -> Complete
 //   - Ready.status == "False":
 //   - if Ready.reason is in {"Infeasible","NotSupported","UnsupportedZoneChange"} -> Infeasible
-//   - otherwise -> Error
+//   - otherwise -> InProgress (the migration is still running or retrying)
 //   - Ready absent, Ready.status == "Unknown", or anything else -> InProgress
 //
 // Other conditions (Validated, StorageInSync) carry sub-step progress and do
 // not on their own indicate a terminal outcome.
+//
+// The caller must additionally confirm that the CR targets the storage policy
+// CSI is modifying to before acting on Complete / Infeasible.
 func classifyMigrationCR(cr *unstructured.Unstructured) migrationOutcome {
 	if cr == nil {
 		return migrationOutcomeInProgress
@@ -336,6 +342,9 @@ func classifyMigrationCR(cr *unstructured.Unstructured) migrationOutcome {
 		if t, _ := cm["type"].(string); t != "Ready" {
 			continue
 		}
+		if !isConditionObservedGenerationCurrent(cm, cr.GetGeneration()) {
+			return migrationOutcomeInProgress
+		}
 		status, _ := cm["status"].(string)
 		switch status {
 		case "True":
@@ -346,12 +355,68 @@ func classifyMigrationCR(cr *unstructured.Unstructured) migrationOutcome {
 			case "Infeasible", "NotSupported", "UnsupportedZoneChange":
 				return migrationOutcomeInfeasible
 			}
-			return migrationOutcomeError
+			return migrationOutcomeInProgress
 		}
 		// Ready=Unknown or unset status string -> still in progress.
 		return migrationOutcomeInProgress
 	}
 	return migrationOutcomeInProgress
+}
+
+// isConditionObservedGenerationCurrent reports whether the condition's
+// observedGeneration matches the CR's metadata.generation. A missing
+// observedGeneration is treated as not current.
+func isConditionObservedGenerationCurrent(cond map[string]interface{}, generation int64) bool {
+	switch og := cond["observedGeneration"].(type) {
+	case int64:
+		return og == generation
+	case float64:
+		return int64(og) == generation
+	}
+	return false
+}
+
+// isMigrationCRForTargetPolicy reports whether the migration CR spec targets
+// the storage policy CSI is modifying the PVC to. The target is resolved from
+// the PVC's current VolumeAttributesClass, so a retarget or rollback that has
+// not yet been reconciled into the CR is detected as a mismatch.
+func isMigrationCRForTargetPolicy(ctx context.Context, metadataSyncer *metadataSyncInformer,
+	pvcNamespace, pvcName string, cr *unstructured.Unstructured) bool {
+	log := logger.GetLogger(ctx)
+	targetPolicyID, err := migrationResolveTargetStoragePolicyID(ctx, metadataSyncer, pvcNamespace, pvcName)
+	if err != nil {
+		log.Warnf("isMigrationCRForTargetPolicy: failed to resolve target storage policy for PVC %s/%s: %v",
+			pvcNamespace, pvcName, err)
+		return false
+	}
+	crPolicyID := lookupNewStoragePolicyID(cr, pvcName)
+	if targetPolicyID == "" || crPolicyID != targetPolicyID {
+		log.Infof("isMigrationCRForTargetPolicy: migration CR %s/%s targets policy %q but PVC %s/%s is being "+
+			"modified to policy %q; waiting for Mobility Operator to reconcile",
+			cr.GetKind(), cr.GetName(), crPolicyID, pvcNamespace, pvcName, targetPolicyID)
+		return false
+	}
+	return true
+}
+
+// resolveTargetStoragePolicyID returns the storage policy ID of the
+// VolumeAttributesClass currently set on the PVC's spec.
+func resolveTargetStoragePolicyID(ctx context.Context, metadataSyncer *metadataSyncInformer,
+	pvcNamespace, pvcName string) (string, error) {
+	pvc, err := metadataSyncer.pvcLister.PersistentVolumeClaims(pvcNamespace).Get(pvcName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get PVC %s/%s from lister: %w", pvcNamespace, pvcName, err)
+	}
+	if pvc.Spec.VolumeAttributesClassName == nil || *pvc.Spec.VolumeAttributesClassName == "" {
+		return "", fmt.Errorf("PVC %s/%s has no VolumeAttributesClass set", pvcNamespace, pvcName)
+	}
+	vacName := *pvc.Spec.VolumeAttributesClassName
+	vac, err := metadataSyncer.supervisorClient.StorageV1().VolumeAttributesClasses().
+		Get(ctx, vacName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get VolumeAttributesClass %s: %w", vacName, err)
+	}
+	return getStoragePolicyIDFromVAC(vac), nil
 }
 
 // getMigrationCR fetches the named migration CR from the supervisor namespace.
@@ -398,7 +463,7 @@ func patchMigrationConditionsInProgress(ctx context.Context, pvcNamespace, pvcNa
 }
 
 // patchMigrationConditionsTerminal sets MigrationConditions to a terminal type
-// (Error or Infeasible). Spec is NOT changed.
+// (Infeasible). Spec is NOT changed.
 func patchMigrationConditionsTerminal(ctx context.Context, pvcNamespace, pvcName, conditionType string,
 	metadataSyncer *metadataSyncInformer) error {
 	return patchMigrationConditionsType(ctx, pvcNamespace, pvcName, conditionType, metadataSyncer)
