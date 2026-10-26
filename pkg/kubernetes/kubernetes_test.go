@@ -30,9 +30,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -351,4 +353,54 @@ func TestGetRestClientConfigForSupervisor(t *testing.T) {
 	t.Run("InvalidCA", func(t *testing.T) {
 		assert.Nil(t, getRestClientConfigForSupervisor(ctx, "h", "1", tokenFile, filepath.Join(dir, "none")))
 	})
+}
+
+// TestWatchersPassFieldSelectorToServer verifies that the watchers send the
+// caller's FieldSelector to the API server instead of replacing it, so a watch
+// on metadata.name=<object> only streams events for that object.
+func TestWatchersPassFieldSelectorToServer(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		newWatcher func(cfg *restclient.Config) (*cache.ListWatch, error)
+	}{
+		{
+			name: "VirtualMachine",
+			newWatcher: func(cfg *restclient.Config) (*cache.ListWatch, error) {
+				return NewVirtualMachineWatcher(ctx, cfg, "test-ns")
+			},
+		},
+		{
+			name: "CnsFileAccessConfig",
+			newWatcher: func(cfg *restclient.Config) (*cache.ListWatch, error) {
+				return NewCnsFileAccessConfigWatcher(ctx, cfg, "test-ns")
+			},
+		},
+		{
+			name: "CSINodeTopology",
+			newWatcher: func(cfg *restclient.Config) (*cache.ListWatch, error) {
+				return NewCSINodeTopologyWatcher(ctx, cfg)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotFieldSelector string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotFieldSelector = r.URL.Query().Get("fieldSelector")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			lw, err := tt.newWatcher(&restclient.Config{Host: srv.URL})
+			assert.NoError(t, err)
+
+			fieldSelector := fields.OneTermEqualSelector("metadata.name", "test-object").String()
+			w, err := lw.WatchWithContext(ctx, metav1.ListOptions{FieldSelector: fieldSelector})
+			assert.NoError(t, err)
+			w.Stop()
+			assert.Equal(t, fieldSelector, gotFieldSelector)
+		})
+	}
 }
