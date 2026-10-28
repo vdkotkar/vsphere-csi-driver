@@ -1164,7 +1164,7 @@ func TestControllerPublishForBlockVolumeStaleAttach(t *testing.T) {
 
 	newVM := func() *vmoperatortypes.VirtualMachine {
 		return &vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 		}
 	}
 
@@ -1275,7 +1275,7 @@ func TestControllerPublishForBlockVolumeStaleAttachOnRetry(t *testing.T) {
 	vmClient := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 		}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cli ctrlclient.WithWatch, obj ctrlclient.Object,
@@ -1350,7 +1350,7 @@ func TestControllerPublishForBlockVolumeBackoffOnConflict(t *testing.T) {
 	}
 
 	vm := &vmoperatortypes.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 	}
 	// status.Volumes reports the disk as already attached so that the call
 	// returns without needing the VirtualMachine watch.
@@ -1499,7 +1499,7 @@ func TestControllerPublishForBlockVolumeCanceledDuringBackoffReportsCanceled(t *
 	vmClient := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 		}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cli ctrlclient.WithWatch, obj ctrlclient.Object,
@@ -1552,7 +1552,7 @@ func TestRemoveVolumeFromVMSpecCanceledDuringBackoffPreservesReason(t *testing.T
 	vmClient := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 			Spec: vmoperatortypes.VirtualMachineSpec{
 				Volumes: []vmoperatortypes.VirtualMachineVolume{{Name: volumeHandle}},
 			},
@@ -1651,14 +1651,12 @@ func TestWaitBeforeVMPatchRetry(t *testing.T) {
 // controllerPublishForBlockVolume concurrently for different volumes on the
 // SAME node, so they race to patch that node's VirtualMachine.Spec.Volumes.
 // Unlike the other conflict tests in this file, no interceptor injects a
-// canned conflict error - the fake client's own optimistic-lock enforcement
-// produces real conflicts when concurrent patches collide, the same way the
-// real API server does: objects added via WithObjects get a resourceVersion
-// assigned automatically (controller-runtime fake client, versioned_tracker.go),
-// and MergeFromWithOptimisticLock embeds it in the patch, so the tracker's
-// accessor.GetResourceVersion() != oldAccessor.GetResourceVersion() check
-// (versioned_tracker.go) rejects a patch carrying a resourceVersion that
-// another goroutine's successful patch has since bumped past.
+// canned conflict error - the patch's own lock produces real conflicts when
+// concurrent patches collide, the same way the real API server does: the patch
+// carries a JSON Patch test on metadata.generation, which the Patch interceptor
+// below bumps on every successful patch as the API server would, so a patch
+// carrying a generation that another goroutine's successful patch has since
+// bumped past fails its test op.
 //
 // It asserts three things a tight, backoff-less retry loop could get wrong
 // under this kind of burst: every volume ends up attached (no request gives
@@ -1703,7 +1701,7 @@ func TestControllerPublishForBlockVolumeConcurrentAttachesToSameNode(t *testing.
 	// call returns without needing the VirtualMachine watch - the watch
 	// plumbing isn't what this test is exercising.
 	vm := &vmoperatortypes.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 	}
 	vm.Status.Volumes = statusVolumes
 
@@ -1721,7 +1719,7 @@ func TestControllerPublishForBlockVolumeConcurrentAttachesToSameNode(t *testing.
 	// goroutine, since Get is the first thing controllerPublishForBlockVolume
 	// does - until all of them have arrived, then release them together. This
 	// guarantees every goroutine reads the same pre-patch VirtualMachine
-	// (same resourceVersion) before any of them patches it, so at least
+	// (same generation) before any of them patches it, so at least
 	// numVolumes-1 real conflicts on the first wave are certain, not just
 	// likely: relying on goroutine scheduling alone to produce contention,
 	// without this gate, would make the test flaky under a scheduler that
@@ -1735,6 +1733,7 @@ func TestControllerPublishForBlockVolumeConcurrentAttachesToSameNode(t *testing.
 	}()
 	var getCalls atomic.Int64
 	var patchAttempts atomic.Int64
+	var patchMu sync.Mutex
 	vmClient := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(vm).
@@ -1746,7 +1745,7 @@ func TestControllerPublishForBlockVolumeConcurrentAttachesToSameNode(t *testing.
 				// read happened after release, a goroutine scheduled first
 				// (e.g. with GOMAXPROCS=1) could finish its Get and patch
 				// before the others read, handing them the bumped
-				// resourceVersion and producing no conflicts at all.
+				// generation and producing no conflicts at all.
 				err := cli.Get(ctx, key, obj, opts...)
 				if getCalls.Add(1) <= int64(numVolumes) {
 					gate.Done()
@@ -1761,7 +1760,21 @@ func TestControllerPublishForBlockVolumeConcurrentAttachesToSameNode(t *testing.
 			Patch: func(ctx context.Context, cli ctrlclient.WithWatch, obj ctrlclient.Object,
 				patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
 				patchAttempts.Add(1)
-				return cli.Patch(ctx, obj, patch, opts...)
+				// The fake client does not bump metadata.generation on spec
+				// changes, which the API server does. Emulate it, atomically
+				// with the patch, so a patch carrying a stale generation fails
+				// its test op the same way it would against the API server.
+				patchMu.Lock()
+				defer patchMu.Unlock()
+				if err := cli.Patch(ctx, obj, patch, opts...); err != nil {
+					return err
+				}
+				current := &vmoperatortypes.VirtualMachine{}
+				if err := cli.Get(ctx, ctrlclient.ObjectKeyFromObject(obj), current); err != nil {
+					return err
+				}
+				current.Generation++
+				return cli.Update(ctx, current)
 			},
 		}).
 		Build()
@@ -1814,7 +1827,7 @@ func TestControllerPublishForBlockVolumeConcurrentAttachesToSameNode(t *testing.
 
 	// The starting gate above guarantees at least numVolumes-1 conflicts on
 	// the first wave alone (only one of numVolumes goroutines reading the
-	// same resourceVersion can win), so total patch attempts must reach at
+	// same generation can win), so total patch attempts must reach at
 	// least numVolumes (first wave) + (numVolumes-1) (their first retry).
 	if wantMinAttempts := int64(2*numVolumes - 1); patchAttempts.Load() < wantMinAttempts {
 		t.Errorf("expected at least %d patch attempts (%d volumes + at least %d guaranteed first-wave "+
@@ -1852,7 +1865,7 @@ func TestControllerUnpublishForBlockVolumeWatchTermination(t *testing.T) {
 	// function proceeds to the watch loop under test.
 	newAttachedVM := func() *vmoperatortypes.VirtualMachine {
 		return &vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 			Status: vmoperatortypes.VirtualMachineStatus{
 				Volumes: []vmoperatortypes.VirtualMachineVolumeStatus{
 					{Name: volumeHandle, Attached: true},
@@ -1957,7 +1970,7 @@ func TestControllerPublishStaleAfterPatch(t *testing.T) {
 	vmClient := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 		}).
 		Build()
 
@@ -2088,7 +2101,7 @@ func runStaleAfterPatchCancelDuringCleanup(t *testing.T, cleanupAlwaysFails bool
 	vmClient := ctrlclientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&vmoperatortypes.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: namespace, Generation: 1},
 		}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cli ctrlclient.WithWatch, obj ctrlclient.Object,

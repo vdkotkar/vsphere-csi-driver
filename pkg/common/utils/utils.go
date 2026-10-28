@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"strconv"
 
@@ -397,21 +398,49 @@ func GetVirtualMachine(ctx context.Context, vmKey types.NamespacedName,
 	return vm, apiVersion, nil
 }
 
-func PatchVirtualMachine(ctx context.Context, vmOperatorClient client.Client,
+// PatchVirtualMachineVolumes sets vm.Spec.Volumes on the VirtualMachine, provided
+// its spec has not changed since old_vm was read.
+//
+// It replaces the whole volumes list and refuses to apply if the spec changed
+// in between, so concurrent attach/detach calls cannot drop each other's
+// volumes. The guard is a JSON Patch test on metadata.generation rather than a
+// resourceVersion precondition: generation only changes on spec updates, while
+// resourceVersion also changes on every status update vm-operator makes. With
+// many volumes those status updates are frequent enough that
+// resourceVersion-guarded patches keep failing with conflicts and are retried
+// several times per attach/detach.
+func PatchVirtualMachineVolumes(ctx context.Context, vmOperatorClient client.Client,
 	vm, old_vm *vmoperatortypes.VirtualMachine) error {
 	log := logger.GetLogger(ctx)
 
-	log.Infof("PatchVirtualMachine: patch virtualmachine name: %s", vm.Name)
-	// try patch virtualmachine with latest api version
-	vmPatch := client.MergeFromWithOptions(
-		old_vm.DeepCopy(),
-		client.MergeFromWithOptimisticLock{})
-	err := vmOperatorClient.Patch(ctx, vm, vmPatch)
+	log.Infof("PatchVirtualMachineVolumes: patch volumes of virtualmachine name: %s, generation: %d",
+		vm.Name, old_vm.Generation)
+	patchOps := []map[string]interface{}{
+		{"op": "test", "path": "/metadata/generation", "value": old_vm.Generation},
+	}
+	if len(vm.Spec.Volumes) > 0 {
+		patchOps = append(patchOps, map[string]interface{}{
+			"op": "add", "path": "/spec/volumes", "value": vm.Spec.Volumes,
+		})
+	} else {
+		// The last volume was removed. spec.volumes is omitempty, so drop the
+		// field rather than setting it to an empty list.
+		patchOps = append(patchOps, map[string]interface{}{
+			"op": "remove", "path": "/spec/volumes",
+		})
+	}
+	patchData, err := json.Marshal(patchOps)
 	if err != nil {
-		log.Errorf("PatchVirtualMachine: error while patching virtualmachine name: %s, err %v",
+		log.Errorf("PatchVirtualMachineVolumes: failed to marshal patch for virtualmachine name: %s, err %v",
 			vm.Name, err)
 		return err
 	}
-	log.Infof("PatchVirtualMachine: successfully patched the virtualmachine, name: %s", vm.Name)
+	err = vmOperatorClient.Patch(ctx, vm, client.RawPatch(types.JSONPatchType, patchData))
+	if err != nil {
+		log.Errorf("PatchVirtualMachineVolumes: error while patching virtualmachine name: %s, err %v",
+			vm.Name, err)
+		return err
+	}
+	log.Infof("PatchVirtualMachineVolumes: successfully patched the virtualmachine, name: %s", vm.Name)
 	return nil
 }

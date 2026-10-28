@@ -521,284 +521,6 @@ func (e *patchErrorClient) Patch(ctx context.Context, obj client.Object,
 	return e.err
 }
 
-// TestPatchVirtualMachine tests the PatchVirtualMachine function
-func TestPatchVirtualMachine(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name        string
-		vm          *vmoperatortypes.VirtualMachine
-		oldVM       *vmoperatortypes.VirtualMachine
-		expectError bool
-		clientError error
-		setupClient func(*testing.T, *vmoperatortypes.VirtualMachine) client.Client
-	}{
-		{
-			name: "Successfully patch VM with spec change",
-			vm: &vmoperatortypes.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-vm",
-					Namespace:       "test-namespace",
-					ResourceVersion: "1",
-				},
-				Spec: vmoperatortypes.VirtualMachineSpec{
-					ImageName: "updated-image",
-					ClassName: "updated-class",
-				},
-			},
-			oldVM: &vmoperatortypes.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-vm",
-					Namespace:       "test-namespace",
-					ResourceVersion: "1",
-				},
-				Spec: vmoperatortypes.VirtualMachineSpec{
-					ImageName: "original-image",
-					ClassName: "original-class",
-				},
-			},
-			expectError: false,
-			setupClient: func(t *testing.T, vm *vmoperatortypes.VirtualMachine) client.Client {
-				scheme := runtime.NewScheme()
-				err := vmoperatortypes.AddToScheme(scheme)
-				if err != nil {
-					t.Fatalf("Failed to add vmoperator scheme: %v", err)
-				}
-				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm).Build()
-			},
-		},
-		{
-			name: "Successfully patch VM with metadata change",
-			vm: &vmoperatortypes.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vm",
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						"new-label": "new-value",
-					},
-					ResourceVersion: "2",
-				},
-				Spec: vmoperatortypes.VirtualMachineSpec{
-					ImageName: "test-image",
-				},
-			},
-			oldVM: &vmoperatortypes.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-vm",
-					Namespace:       "test-namespace",
-					ResourceVersion: "1",
-				},
-				Spec: vmoperatortypes.VirtualMachineSpec{
-					ImageName: "test-image",
-				},
-			},
-			expectError: false,
-			setupClient: func(t *testing.T, vm *vmoperatortypes.VirtualMachine) client.Client {
-				scheme := runtime.NewScheme()
-				err := vmoperatortypes.AddToScheme(scheme)
-				if err != nil {
-					t.Fatalf("Failed to add vmoperator scheme: %v", err)
-				}
-				return fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm).Build()
-			},
-		},
-		{
-			name: "Error when patch fails",
-			vm: &vmoperatortypes.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-vm",
-					Namespace:       "test-namespace",
-					ResourceVersion: "1",
-				},
-				Spec: vmoperatortypes.VirtualMachineSpec{
-					ImageName: "updated-image",
-				},
-			},
-			oldVM: &vmoperatortypes.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test-vm",
-					Namespace:       "test-namespace",
-					ResourceVersion: "1",
-				},
-				Spec: vmoperatortypes.VirtualMachineSpec{
-					ImageName: "original-image",
-				},
-			},
-			expectError: true,
-			clientError: errors.New("failed to patch virtual machine"),
-			setupClient: func(t *testing.T, vm *vmoperatortypes.VirtualMachine) client.Client {
-				scheme := runtime.NewScheme()
-				err := vmoperatortypes.AddToScheme(scheme)
-				if err != nil {
-					t.Fatalf("Failed to add vmoperator scheme: %v", err)
-				}
-				baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-				return &patchErrorClient{
-					Client: baseClient,
-					err:    errors.New("failed to patch virtual machine"),
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create the initial VM in the client
-			initialVM := tt.oldVM.DeepCopy()
-			fakeClient := tt.setupClient(t, initialVM)
-
-			err := PatchVirtualMachine(ctx, fakeClient, tt.vm, tt.oldVM)
-
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got none")
-				}
-				if tt.clientError != nil && err.Error() != tt.clientError.Error() {
-					t.Errorf("Expected error %v, but got %v", tt.clientError, err)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
-				// Verify the VM was patched by getting it from the client
-				patchedVM := &vmoperatortypes.VirtualMachine{}
-				err = fakeClient.Get(ctx, client.ObjectKey{
-					Name:      tt.vm.Name,
-					Namespace: tt.vm.Namespace,
-				}, patchedVM)
-				if err != nil {
-					t.Errorf("Failed to get patched VM: %v", err)
-				}
-				// Verify the spec was updated
-				if patchedVM.Spec.ImageName != tt.vm.Spec.ImageName {
-					t.Errorf("Expected ImageName %s, but got %s", tt.vm.Spec.ImageName,
-						patchedVM.Spec.ImageName)
-				}
-			}
-		})
-	}
-}
-
-// TestPatchVirtualMachineOptimisticLocking tests that optimistic locking is used
-func TestPatchVirtualMachineOptimisticLocking(t *testing.T) {
-	ctx := context.Background()
-
-	scheme := runtime.NewScheme()
-	err := vmoperatortypes.AddToScheme(scheme)
-	if err != nil {
-		t.Fatalf("Failed to add vmoperator scheme: %v", err)
-	}
-
-	// Create initial VM
-	oldVM := &vmoperatortypes.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-vm",
-			Namespace:       "test-namespace",
-			ResourceVersion: "1",
-		},
-		Spec: vmoperatortypes.VirtualMachineSpec{
-			ImageName: "original-image",
-		},
-	}
-
-	// Create updated VM
-	newVM := &vmoperatortypes.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-vm",
-			Namespace:       "test-namespace",
-			ResourceVersion: "2",
-		},
-		Spec: vmoperatortypes.VirtualMachineSpec{
-			ImageName: "updated-image",
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldVM).Build()
-
-	err = PatchVirtualMachine(ctx, fakeClient, newVM, oldVM)
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
-
-	// Verify the patch was applied
-	patchedVM := &vmoperatortypes.VirtualMachine{}
-	err = fakeClient.Get(ctx, client.ObjectKey{
-		Name:      newVM.Name,
-		Namespace: newVM.Namespace,
-	}, patchedVM)
-	if err != nil {
-		t.Fatalf("Failed to get patched VM: %v", err)
-	}
-
-	if patchedVM.Spec.ImageName != "updated-image" {
-		t.Errorf("Expected ImageName 'updated-image', but got %s", patchedVM.Spec.ImageName)
-	}
-}
-
-// TestPatchVirtualMachinePartialUpdate tests that only changed fields are updated
-func TestPatchVirtualMachinePartialUpdate(t *testing.T) {
-	ctx := context.Background()
-
-	scheme := runtime.NewScheme()
-	err := vmoperatortypes.AddToScheme(scheme)
-	if err != nil {
-		t.Fatalf("Failed to add vmoperator scheme: %v", err)
-	}
-
-	// Create initial VM with multiple fields
-	oldVM := &vmoperatortypes.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-vm",
-			Namespace:       "test-namespace",
-			ResourceVersion: "1",
-		},
-		Spec: vmoperatortypes.VirtualMachineSpec{
-			ImageName: "original-image",
-			ClassName: "original-class",
-		},
-	}
-
-	// Create updated VM - only ImageName changed
-	newVM := &vmoperatortypes.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-vm",
-			Namespace:       "test-namespace",
-			ResourceVersion: "2",
-		},
-		Spec: vmoperatortypes.VirtualMachineSpec{
-			ImageName: "updated-image",
-			ClassName: "original-class", // This should remain unchanged
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldVM).Build()
-
-	err = PatchVirtualMachine(ctx, fakeClient, newVM, oldVM)
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
-
-	// Verify the patch was applied correctly
-	patchedVM := &vmoperatortypes.VirtualMachine{}
-	err = fakeClient.Get(ctx, client.ObjectKey{
-		Name:      newVM.Name,
-		Namespace: newVM.Namespace,
-	}, patchedVM)
-	if err != nil {
-		t.Fatalf("Failed to get patched VM: %v", err)
-	}
-
-	// Verify ImageName was updated
-	if patchedVM.Spec.ImageName != "updated-image" {
-		t.Errorf("Expected ImageName 'updated-image', but got %s", patchedVM.Spec.ImageName)
-	}
-
-	// Verify ClassName remained unchanged
-	if patchedVM.Spec.ClassName != "original-class" {
-		t.Errorf("Expected ClassName 'original-class', but got %s", patchedVM.Spec.ClassName)
-	}
-}
-
 // getErrorClient is a wrapper around a fake client that returns errors on Get operations
 type getErrorClient struct {
 	client.Client
@@ -1026,4 +748,143 @@ func TestGetVirtualMachineAPIVersion(t *testing.T) {
 	if retrievedVM.Spec.ImageName != "test-image" {
 		t.Errorf("Expected ImageName 'test-image', but got %s", retrievedVM.Spec.ImageName)
 	}
+}
+
+// TestPatchVirtualMachineVolumes tests that PatchVirtualMachineVolumes replaces
+// the volumes list only when metadata.generation still matches, and that a
+// status-only update in between does not make it fail.
+func TestPatchVirtualMachineVolumes(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := vmoperatortypes.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add vmoperator scheme: %v", err)
+	}
+	key := client.ObjectKey{Name: "test-vm", Namespace: "test-namespace"}
+	volume := func(name string) vmoperatortypes.VirtualMachineVolume {
+		return vmoperatortypes.VirtualMachineVolume{Name: name}
+	}
+	newClient := func(volumes ...vmoperatortypes.VirtualMachineVolume) client.Client {
+		return fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(&vmoperatortypes.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Generation: 1},
+				Spec:       vmoperatortypes.VirtualMachineSpec{ImageName: "test-image", Volumes: volumes},
+			}).
+			WithStatusSubresource(&vmoperatortypes.VirtualMachine{}).
+			Build()
+	}
+	getVM := func(t *testing.T, c client.Client) *vmoperatortypes.VirtualMachine {
+		vm := &vmoperatortypes.VirtualMachine{}
+		if err := c.Get(ctx, key, vm); err != nil {
+			t.Fatalf("Failed to get VM: %v", err)
+		}
+		return vm
+	}
+
+	t.Run("Adds volume when generation matches", func(t *testing.T) {
+		c := newClient(volume("vol-1"))
+		vm := getVM(t, c)
+		oldVM := vm.DeepCopy()
+		vm.Spec.Volumes = append(vm.Spec.Volumes, volume("vol-2"))
+
+		if err := PatchVirtualMachineVolumes(ctx, c, vm, oldVM); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		patchedVM := getVM(t, c)
+		if len(patchedVM.Spec.Volumes) != 2 || patchedVM.Spec.Volumes[0].Name != "vol-1" ||
+			patchedVM.Spec.Volumes[1].Name != "vol-2" {
+			t.Errorf("Expected volumes [vol-1 vol-2], got %+v", patchedVM.Spec.Volumes)
+		}
+		if patchedVM.Spec.ImageName != "test-image" {
+			t.Errorf("Expected ImageName 'test-image' to be unchanged, got %s", patchedVM.Spec.ImageName)
+		}
+	})
+
+	t.Run("Succeeds after a status-only update", func(t *testing.T) {
+		c := newClient(volume("vol-1"))
+		vm := getVM(t, c)
+		oldVM := vm.DeepCopy()
+
+		// A status update changes resourceVersion but not generation.
+		statusVM := getVM(t, c)
+		statusVM.Status.Volumes = []vmoperatortypes.VirtualMachineVolumeStatus{{Name: "vol-1", Attached: true}}
+		if err := c.Status().Update(ctx, statusVM); err != nil {
+			t.Fatalf("Failed to update VM status: %v", err)
+		}
+		if statusVM.ResourceVersion == oldVM.ResourceVersion {
+			t.Fatalf("Expected status update to change resourceVersion")
+		}
+
+		vm.Spec.Volumes = append(vm.Spec.Volumes, volume("vol-2"))
+		if err := PatchVirtualMachineVolumes(ctx, c, vm, oldVM); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if patchedVM := getVM(t, c); len(patchedVM.Spec.Volumes) != 2 {
+			t.Errorf("Expected 2 volumes, got %+v", patchedVM.Spec.Volumes)
+		}
+	})
+
+	t.Run("Fails when generation changed", func(t *testing.T) {
+		c := newClient(volume("vol-1"))
+		vm := getVM(t, c)
+		oldVM := vm.DeepCopy()
+
+		// Simulate another writer's spec update, which bumps generation.
+		otherVM := getVM(t, c)
+		otherVM.Spec.Volumes = append(otherVM.Spec.Volumes, volume("vol-other"))
+		otherVM.Generation++
+		if err := c.Update(ctx, otherVM); err != nil {
+			t.Fatalf("Failed to update VM: %v", err)
+		}
+
+		vm.Spec.Volumes = append(vm.Spec.Volumes, volume("vol-2"))
+		if err := PatchVirtualMachineVolumes(ctx, c, vm, oldVM); err == nil {
+			t.Fatalf("Expected error for stale generation, got none")
+		}
+		patchedVM := getVM(t, c)
+		if len(patchedVM.Spec.Volumes) != 2 || patchedVM.Spec.Volumes[1].Name != "vol-other" {
+			t.Errorf("Expected the other writer's volumes [vol-1 vol-other] to be kept, got %+v",
+				patchedVM.Spec.Volumes)
+		}
+	})
+
+	t.Run("Removes one of several volumes", func(t *testing.T) {
+		c := newClient(volume("vol-1"), volume("vol-2"))
+		vm := getVM(t, c)
+		oldVM := vm.DeepCopy()
+		vm.Spec.Volumes = vm.Spec.Volumes[1:]
+
+		if err := PatchVirtualMachineVolumes(ctx, c, vm, oldVM); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		patchedVM := getVM(t, c)
+		if len(patchedVM.Spec.Volumes) != 1 || patchedVM.Spec.Volumes[0].Name != "vol-2" {
+			t.Errorf("Expected volumes [vol-2], got %+v", patchedVM.Spec.Volumes)
+		}
+	})
+
+	t.Run("Removes the last volume", func(t *testing.T) {
+		c := newClient(volume("vol-1"))
+		vm := getVM(t, c)
+		oldVM := vm.DeepCopy()
+		vm.Spec.Volumes = vm.Spec.Volumes[:0]
+
+		if err := PatchVirtualMachineVolumes(ctx, c, vm, oldVM); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if patchedVM := getVM(t, c); len(patchedVM.Spec.Volumes) != 0 {
+			t.Errorf("Expected no volumes, got %+v", patchedVM.Spec.Volumes)
+		}
+	})
+
+	t.Run("Returns client error", func(t *testing.T) {
+		c := &patchErrorClient{Client: newClient(volume("vol-1")), err: errors.New("failed to patch virtual machine")}
+		vm := getVM(t, c)
+		oldVM := vm.DeepCopy()
+		vm.Spec.Volumes = append(vm.Spec.Volumes, volume("vol-2"))
+
+		err := PatchVirtualMachineVolumes(ctx, c, vm, oldVM)
+		if err == nil || err.Error() != "failed to patch virtual machine" {
+			t.Errorf("Expected error 'failed to patch virtual machine', got %v", err)
+		}
+	})
 }

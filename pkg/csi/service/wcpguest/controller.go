@@ -1162,7 +1162,7 @@ func removeVolumeFromVMSpec(ctx context.Context, c *controller, vmKey types.Name
 				volumeID, vmKey.Name)
 			return nil
 		}
-		err = utils.PatchVirtualMachine(ctx, c.vmOperatorClient, virtualMachine, oldVirtualMachine)
+		err = utils.PatchVirtualMachineVolumes(ctx, c.vmOperatorClient, virtualMachine, oldVirtualMachine)
 		if err == nil {
 			log.Infof("Removed volume %q from virtualmachine %q spec", volumeID, vmKey.Name)
 			return nil
@@ -1246,7 +1246,7 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 			return nil, csifault.CSIInternalFault, status.Error(codes.FailedPrecondition, msg)
 		}
 		// Issue a patch with the modified VM against the patch created above.
-		if err := utils.PatchVirtualMachine(ctx, c.vmOperatorClient, virtualMachine, oldVirtualMachine); err == nil {
+		if err := utils.PatchVirtualMachineVolumes(ctx, c.vmOperatorClient, virtualMachine, oldVirtualMachine); err == nil {
 			break
 		} else {
 			log.Errorf("failed to update virtualmachine. Err: %v", err)
@@ -1656,7 +1656,7 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 				log.Debugf("Removing volume %q from VirtualMachine %q", volume.Name, virtualMachine.Name)
 				virtualMachine.Spec.Volumes = append(virtualMachine.Spec.Volumes[:index],
 					virtualMachine.Spec.Volumes[index+1:]...)
-				err = utils.PatchVirtualMachine(ctx, c.vmOperatorClient, virtualMachine, oldVirtualMachine)
+				err = utils.PatchVirtualMachineVolumes(ctx, c.vmOperatorClient, virtualMachine, oldVirtualMachine)
 				break
 			}
 		}
