@@ -1113,7 +1113,9 @@ func listVolumeInfosByVolumeID(ctx context.Context) map[string]*cnsvolumeinfov1a
 // preReadVolumeInfos whose aggregated snapshot size differs from CNS. preReadVolumeInfos must be read
 // before cnsBlockVolumeMap was queried from CNS.
 //
-// A volume is skipped only when its pre-read value already matches CNS. Each correction is conditioned on
+// A volume is skipped only when its pre-read value already matches CNS. Before a recorded size is replaced,
+// CNS is synced and queried again for that volume, since the bulk query can return a size CNS has not yet
+// refreshed after a snapshot operation. Each correction is conditioned on
 // the pre-read resourceVersion, so a CnsVolumeInfo written during the CNS query is not overwritten with the
 // older query result; its capacity is re-measured instead. If such a write lands and CNS returns to the
 // pre-read value before the query, the volume is skipped and corrected by the next full sync.
@@ -1147,6 +1149,23 @@ func validateAndCorrectVolumeInfoSnapshotDetails(ctx context.Context, volManager
 			}
 			log.Infof("Aggregated Snapshot size mismatch for volume %s, %s in CnsVolumeInfo and %dMB in CNS",
 				volumeID, cnsvolumeinfo.Spec.AggregatedSnapshotSize.String(), aggregatedSnapshotCapacityInMB)
+			// The bulk query returns the space usage CNS last cached, which can lag a snapshot operation
+			// whose task already reported its size. Refresh CNS before replacing a recorded size.
+			syncedCapacityInMB, err := syncAndQueryAggregatedSnapshotCapacityInMb(ctx, volManager, volumeID)
+			if err != nil {
+				log.Warnf("failed to refresh aggregated snapshot capacity for volume %s from CNS, using %dMB "+
+					"from the full sync query. Error: %+v", volumeID, aggregatedSnapshotCapacityInMB, err)
+			} else {
+				aggregatedSnapshotCapacityInMB = syncedCapacityInMB
+				syncedCapacity := resource.NewQuantity(aggregatedSnapshotCapacityInMB*common.MbInBytes,
+					resource.BinarySI)
+				if syncedCapacity.Value() == cnsvolumeinfo.Spec.AggregatedSnapshotSize.Value() {
+					log.Infof("volume %s Aggregated Snapshot capacity %s in CnsVolumeInfo is in sync with CNS "+
+						"after SyncVolume", volumeID, syncedCapacity.String())
+					alreadySyncedVolumeCount++
+					continue
+				}
+			}
 		}
 		// Nothing to do if it's invalid in CNS and CNSVolumeInfo
 		if !cnsvolumeinfo.Spec.ValidAggregatedSnapshotSize && aggregatedSnapshotCapacityInMB == -1 {
@@ -1174,6 +1193,20 @@ func validateAndCorrectVolumeInfoSnapshotDetails(ctx context.Context, volManager
 	}
 	log.Infof("Number of volumes with synced aggregated snapshot size with CNS %d", alreadySyncedVolumeCount)
 	log.Infof("Number of volumes with out-of-sync aggregated snapshot size with CNS %d", outOfSyncVolumeCount)
+}
+
+// syncAndQueryAggregatedSnapshotCapacityInMb refreshes the space usage CNS caches for the block volume
+// volumeID and returns the aggregated snapshot capacity, in MB, that CNS then records.
+func syncAndQueryAggregatedSnapshotCapacityInMb(ctx context.Context, volManager volumes.Manager,
+	volumeID string) (int64, error) {
+	syncVolumeSpecs := []cnstypes.CnsSyncVolumeSpec{{
+		VolumeId: cnstypes.CnsVolumeId{Id: volumeID},
+		SyncMode: []string{string(cnstypes.CnsSyncVolumeModeSPACE_USAGE)},
+	}}
+	if _, err := volManager.SyncVolume(ctx, syncVolumeSpecs); err != nil {
+		return 0, err
+	}
+	return volumes.QueryAggregatedSnapshotCapacityInMb(ctx, volManager, volumeID)
 }
 
 // fullSyncCreateVolumes creates volumes with given array of createSpec.

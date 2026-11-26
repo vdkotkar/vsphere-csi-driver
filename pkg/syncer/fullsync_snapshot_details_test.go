@@ -67,6 +67,29 @@ func (s *snapshotDetailsService) UpdateVolumeInfoSnapshotDetails(_ context.Conte
 // fullSyncVolumeManager stands in for the CNS volume manager full sync passes along.
 type fullSyncVolumeManager struct {
 	volumes.Manager
+	// syncedCapacityInMb is the aggregated snapshot capacity CNS reports after SyncVolume, by volume ID.
+	syncedCapacityInMb map[string]int64
+	syncErr            error
+	synced             []string
+}
+
+func (m *fullSyncVolumeManager) SyncVolume(_ context.Context,
+	syncVolumeSpecs []cnstypes.CnsSyncVolumeSpec) (string, error) {
+	for _, spec := range syncVolumeSpecs {
+		m.synced = append(m.synced, spec.VolumeId.Id)
+	}
+	return "", m.syncErr
+}
+
+func (m *fullSyncVolumeManager) QueryVolume(_ context.Context,
+	queryFilter cnstypes.CnsQueryFilter) (*cnstypes.CnsQueryResult, error) {
+	result := &cnstypes.CnsQueryResult{}
+	for _, volumeID := range queryFilter.VolumeIds {
+		if capacityInMb, ok := m.syncedCapacityInMb[volumeID.Id]; ok {
+			result.Volumes = append(result.Volumes, cnsBlockVolume(volumeID.Id, capacityInMb))
+		}
+	}
+	return result, nil
 }
 
 func useSnapshotDetailsService(t *testing.T, s *snapshotDetailsService) {
@@ -115,10 +138,13 @@ func TestListVolumeInfosByVolumeID(t *testing.T) {
 
 func TestValidateAndCorrectVolumeInfoSnapshotDetails(t *testing.T) {
 	tests := []struct {
-		name       string
-		preRead    *cnsvolumeinfov1alpha1.CNSVolumeInfo
-		cnsVolume  *cnstypes.CnsVolume
-		wantWrites []snapshotDetailsWrite
+		name               string
+		preRead            *cnsvolumeinfov1alpha1.CNSVolumeInfo
+		cnsVolume          *cnstypes.CnsVolume
+		syncedCapacityInMb map[string]int64
+		syncErr            error
+		wantWrites         []snapshotDetailsWrite
+		wantSynced         []string
 	}{
 		{
 			name:      "in sync with CNS",
@@ -126,10 +152,42 @@ func TestValidateAndCorrectVolumeInfoSnapshotDetails(t *testing.T) {
 			cnsVolume: ptrTo(cnsBlockVolume("vol-1", 5)),
 		},
 		{
-			name:       "mismatch is corrected with the pre-read version",
+			name:               "mismatch is corrected with the pre-read version",
+			preRead:            preReadCVI("vol-1", "3", 5),
+			cnsVolume:          ptrTo(cnsBlockVolume("vol-1", 8)),
+			syncedCapacityInMb: map[string]int64{"vol-1": 8},
+			wantWrites:         []snapshotDetailsWrite{{"vol-1", "3", 8}},
+			wantSynced:         []string{"vol-1"},
+		},
+		{
+			name:               "mismatch is corrected with the size CNS reports after SyncVolume",
+			preRead:            preReadCVI("vol-1", "3", 5),
+			cnsVolume:          ptrTo(cnsBlockVolume("vol-1", 0)),
+			syncedCapacityInMb: map[string]int64{"vol-1": 8},
+			wantWrites:         []snapshotDetailsWrite{{"vol-1", "3", 8}},
+			wantSynced:         []string{"vol-1"},
+		},
+		{
+			name:               "size not yet refreshed in the CNS query is not overwritten",
+			preRead:            preReadCVI("vol-1", "3", 1),
+			cnsVolume:          ptrTo(cnsBlockVolume("vol-1", 0)),
+			syncedCapacityInMb: map[string]int64{"vol-1": 1},
+			wantSynced:         []string{"vol-1"},
+		},
+		{
+			name:       "SyncVolume failure falls back to the full sync query result",
+			preRead:    preReadCVI("vol-1", "3", 5),
+			cnsVolume:  ptrTo(cnsBlockVolume("vol-1", 8)),
+			syncErr:    errors.New("sync failed"),
+			wantWrites: []snapshotDetailsWrite{{"vol-1", "3", 8}},
+			wantSynced: []string{"vol-1"},
+		},
+		{
+			name:       "query failure after SyncVolume falls back to the full sync query result",
 			preRead:    preReadCVI("vol-1", "3", 5),
 			cnsVolume:  ptrTo(cnsBlockVolume("vol-1", 8)),
 			wantWrites: []snapshotDetailsWrite{{"vol-1", "3", 8}},
+			wantSynced: []string{"vol-1"},
 		},
 		{
 			name:       "missing size is filled in",
@@ -138,10 +196,12 @@ func TestValidateAndCorrectVolumeInfoSnapshotDetails(t *testing.T) {
 			wantWrites: []snapshotDetailsWrite{{"vol-1", "3", 8}},
 		},
 		{
-			name:       "size CNS can no longer report is marked invalid",
-			preRead:    preReadCVI("vol-1", "3", 5),
-			cnsVolume:  ptrTo(cnsBlockVolume("vol-1", -1)),
-			wantWrites: []snapshotDetailsWrite{{"vol-1", "3", -1}},
+			name:               "size CNS can no longer report is marked invalid",
+			preRead:            preReadCVI("vol-1", "3", 5),
+			cnsVolume:          ptrTo(cnsBlockVolume("vol-1", -1)),
+			syncedCapacityInMb: map[string]int64{"vol-1": -1},
+			wantWrites:         []snapshotDetailsWrite{{"vol-1", "3", -1}},
+			wantSynced:         []string{"vol-1"},
 		},
 		{
 			name:      "invalid in both CNS and CnsVolumeInfo",
@@ -171,12 +231,13 @@ func TestValidateAndCorrectVolumeInfoSnapshotDetails(t *testing.T) {
 				cnsVolumes[tc.cnsVolume.VolumeId.Id] = *tc.cnsVolume
 			}
 
-			volManager := &fullSyncVolumeManager{}
+			volManager := &fullSyncVolumeManager{syncedCapacityInMb: tc.syncedCapacityInMb, syncErr: tc.syncErr}
 
 			validateAndCorrectVolumeInfoSnapshotDetails(ctx, volManager, cnsVolumes,
 				map[string]*cnsvolumeinfov1alpha1.CNSVolumeInfo{tc.preRead.Spec.VolumeID: tc.preRead})
 
 			assert.Equal(t, tc.wantWrites, service.writes)
+			assert.Equal(t, tc.wantSynced, volManager.synced)
 			for _, m := range service.managers {
 				assert.Same(t, volManager, m, "CNS is re-measured through the full sync volume manager")
 			}
@@ -190,7 +251,8 @@ func TestValidateAndCorrectVolumeInfoSnapshotDetailsContinuesAfterFailure(t *tes
 	service := &snapshotDetailsService{failFor: map[string]bool{"vol-1": true}}
 	useSnapshotDetailsService(t, service)
 
-	validateAndCorrectVolumeInfoSnapshotDetails(ctx, &fullSyncVolumeManager{},
+	validateAndCorrectVolumeInfoSnapshotDetails(ctx,
+		&fullSyncVolumeManager{syncedCapacityInMb: map[string]int64{"vol-1": 8, "vol-2": 9}},
 		map[string]cnstypes.CnsVolume{
 			"vol-1": cnsBlockVolume("vol-1", 8),
 			"vol-2": cnsBlockVolume("vol-2", 9),
